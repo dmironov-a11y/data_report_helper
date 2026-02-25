@@ -321,20 +321,16 @@ def build_slack_report(
         return f"{parts[0]} *{parts[1]}*" if len(parts) == 2 else f"*{s}*"
 
     lines.append(bold(SEC_DONE))
-    if done_issues:
-        for iss_id, iss_title, iss_url in done_issues:
-            lines.append(issue_line(iss_id, iss_title, iss_url))
+    all_done = list(done_issues) + [(i, t, u) for i, t, u in review_issues]
+    review_ids = {i for i, _, _ in review_issues}
+    if all_done:
+        for iss_id, iss_title, iss_url in all_done:
+            suffix = " _(moved to review)_" if iss_id in review_ids else ""
+            lines.append(issue_line(iss_id, iss_title, iss_url, suffix=suffix))
             if "done" in show_commits:
                 lines.extend(_render_commits_slack(done_commits.get(iss_id, [])))
     else:
         lines.append("• —")
-
-    if review_issues:
-        lines.append(f"\n{bold(SEC_REVIEW)}")
-        for iss_id, iss_title, iss_url in review_issues:
-            lines.append(issue_line(iss_id, iss_title, iss_url))
-            if "done" in show_commits:
-                lines.extend(_render_commits_slack(done_commits.get(iss_id, [])))
 
     lines.append(f"\n{bold(SEC_IN_PROGRESS)}")
     if worked_on:
@@ -446,20 +442,16 @@ def build_report(
         return f"• {ident}{' — ' + title if title else ''}{suffix}{link}"
 
     lines.append(SEC_DONE)
-    if done_issues:
-        for iss_id, iss_title, iss_url in done_issues:
-            lines.append(issue_line(iss_id, iss_title, iss_url))
+    all_done = list(done_issues) + [(i, t, u) for i, t, u in review_issues]
+    review_ids = {i for i, _, _ in review_issues}
+    if all_done:
+        for iss_id, iss_title, iss_url in all_done:
+            suffix = " (moved to review)" if iss_id in review_ids else ""
+            lines.append(issue_line(iss_id, iss_title, iss_url, suffix=suffix))
             if "done" in show_commits:
                 lines.extend(_render_commits_plain(done_commits.get(iss_id, []), add_links))
     else:
         lines.append("• —")
-
-    if review_issues:
-        lines.append(f"\n{SEC_REVIEW}")
-        for iss_id, iss_title, iss_url in review_issues:
-            lines.append(issue_line(iss_id, iss_title, iss_url))
-            if "done" in show_commits:
-                lines.extend(_render_commits_plain(done_commits.get(iss_id, []), add_links))
 
     lines.append(f"\n{SEC_IN_PROGRESS}")
     if worked_on:

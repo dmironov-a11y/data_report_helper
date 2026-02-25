@@ -81,6 +81,9 @@ uv run standup.py --commits all                # all groups
 # Combine flags
 uv run standup.py --slack --commits all
 uv run standup.py --date 2026-02-17 --commits in_progress --add-links
+
+# Most usefull
+uv run standup.py --slack --add-links --commits all
 ```
 
 ## Output
