@@ -47,6 +47,7 @@ PLANE_PROJECT_ID = os.environ.get("PLANE_PROJECT_ID", "")
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
 GITHUB_ORG = os.environ.get("GITHUB_ORG", "")
 GITHUB_USERNAME = os.environ.get("GITHUB_USERNAME", "")
+GITHUB_EXTRA_REPOS = os.environ.get("GITHUB_EXTRA_REPOS", "")  # comma-separated "org/repo" entries
 
 SLACK_BOT_TOKEN = os.environ.get("SLACK_BOT_TOKEN", "")
 SLACK_USER_ID = os.environ.get("SLACK_USER_ID", "")
@@ -256,6 +257,18 @@ def get_github_commits(
                 process(commit)
         except Exception:
             pass
+
+    # Scan extra repos from other orgs
+    if GITHUB_EXTRA_REPOS:
+        extra = [r.strip() for r in GITHUB_EXTRA_REPOS.split(",") if r.strip()]
+        print(f"  GitHub: scanning {len(extra)} extra repo(s)...", file=sys.stderr)
+        for full_name in extra:
+            try:
+                repo = gh.get_repo(full_name)
+                for commit in repo.get_commits(author=GITHUB_USERNAME, since=since, until=until):
+                    process(commit)
+            except Exception as exc:
+                print(f"  [WARN] Could not scan {full_name}: {exc}", file=sys.stderr)
 
     return {t: sorted(msgs) for t, msgs in sorted(by_ticket.items())}, sorted(orphans)
 
@@ -606,8 +619,24 @@ def main() -> None:
                 continue
 
             if state_group == "completed":
-                done_issues.append((identifier, title, url))
+                completed_at = issue.get("completed_at", "")
+                completed_date = completed_at[:10] if completed_at else ""
+                completed_in_range = (
+                    completed_date
+                    and date_from.isoformat() <= completed_date <= date_to.isoformat()
+                )
+                if completed_in_range:
+                    done_issues.append((identifier, title, url))
+                continue
             elif "review" in state_name:
+                completed_at = issue.get("completed_at", "")
+                completed_date = completed_at[:10] if completed_at else ""
+                completed_in_range = (
+                    completed_date
+                    and date_from.isoformat() <= completed_date <= date_to.isoformat()
+                )
+                if not completed_in_range:
+                    continue
                 review_issues.append((identifier, title, url))
             elif is_blocked:
                 blocked_issues.append((identifier, title, url))
