@@ -6,13 +6,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 uv run standup.py                                    # report for previous working day
-uv run standup.py --date 2026-02-14                  # report for a specific date
+uv run standup.py --standup-date 2026-03-25          # report on March 25
 uv run standup.py --add-links                        # include Plane and GitHub URLs in output
 uv run standup.py --slack                            # send report to Slack DM
 uv run standup.py --commits in_progress              # show commits under in-progress tasks
 uv run standup.py --commits done in_progress         # show commits under done + in-progress
 uv run standup.py --commits all                      # show commits for all groups + orphans
-uv run standup.py --date 2026-02-18 --slack --commits all --add-links              # full featured run
+uv run standup.py --standup-date 2026-03-25 --slack --commits all --add-links      # full featured run
 ```
 
 ## Environment setup

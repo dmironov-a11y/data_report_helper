@@ -62,8 +62,8 @@ If your org uses SSO, click **Authorize** next to the org after creating the tok
 # Basic — report for previous working day (Mon → Fri, otherwise yesterday)
 uv run standup.py
 
-# Specific date
-uv run standup.py --date 2026-02-14
+# Report on a specific date
+uv run standup.py --standup-date 2026-03-25    # what you did on March 25
 
 # Include raw URLs in terminal output (Plane issues + commit links)
 uv run standup.py --add-links
@@ -80,7 +80,7 @@ uv run standup.py --commits all                # all groups
 
 # Combine flags
 uv run standup.py --slack --commits all
-uv run standup.py --date 2026-02-17 --commits in_progress --add-links
+uv run standup.py --standup-date 2026-03-17 --commits in_progress --add-links
 
 # Most usefull
 uv run standup.py --slack --add-links --commits all

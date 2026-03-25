@@ -4,13 +4,12 @@ Daily standup report generator.
 Reads tasks from Plane.so and git commits, outputs a formatted standup message.
 
 Usage:
-    python standup.py [--date YYYY-MM-DD]
+    python standup.py [--standup-date YYYY-MM-DD]
 
-    --date   Override the "previous working day" date manually.
-             Useful if you missed a standup or want to look at a specific day.
-             If not provided, the script auto-detects:
-               - Monday → uses last Friday
-               - Any other weekday → uses yesterday
+    --standup-date  Report on this specific date (e.g. what you did on March 25).
+                    Without this flag, the report covers the previous working day:
+                      - Monday → covers Friday–Sunday
+                      - Any other weekday → covers yesterday
 
 Environment variables:
     PLANE_API_KEY        - Plane.so personal access token
@@ -320,8 +319,8 @@ def build_slack_report(
     show_commits = show_commits or set()
     done_commits = done_commits or {}
 
-    today = date.today().strftime("%Y-%m-%d")
-    lines = [f"*Daily standup — {today}*\n"]
+    report_date = workday.strftime("%B %d, %Y")
+    lines = [f"*Data Async Daily Status: {report_date}*\n"]
 
     def issue_line(i: str, t: str, u: str, suffix: str = "") -> str:
         linked = f"<{u}|{i}>" if u else i
@@ -447,8 +446,8 @@ def build_report(
     done_commits = done_commits or {}
     orphan_commits = orphan_commits or []
 
-    today = date.today().strftime("%Y-%m-%d")
-    lines = [f"Daily standup — {today}\n"]
+    report_date = workday.strftime("%B %d, %Y")
+    lines = [f"Data Async Daily Status: {report_date}\n"]
 
     def issue_line(ident: str, title: str, url: str, suffix: str = "") -> str:
         link = f" {url}" if add_links and url else ""
@@ -513,13 +512,13 @@ def validate_config() -> bool:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Generate daily standup report.")
     parser.add_argument(
-        "--date",
+        "--standup-date",
         metavar="YYYY-MM-DD",
         type=parse_date_arg,
         default=None,
         help=(
-            "The working day to report on (commits + done tasks). "
-            "Defaults to the previous working day: yesterday, or last Friday on Mondays."
+            "Report on this specific date. "
+            "Without this flag, the report covers the previous working day."
         ),
     )
     parser.add_argument(
@@ -556,8 +555,11 @@ def main() -> None:
         sys.exit(1)
 
     today = date.today()
-    workday: date = args.date if args.date else prev_workday(today)
-    date_from, date_to = workday_range(workday, today if not args.date else workday)
+    if args.standup_date:
+        date_from = date_to = args.standup_date
+    else:
+        workday = prev_workday(today)
+        date_from, date_to = workday_range(workday, today)
     period_str = f"{date_from} – {date_to}" if date_from != date_to else str(date_from)
     print(f"Reporting period: {period_str}", file=sys.stderr)
 
@@ -667,7 +669,7 @@ def main() -> None:
 
     # Print plain text to terminal
     report = build_report(
-        done_issues, review_issues, worked_on, blocked_issues, workday,
+        done_issues, review_issues, worked_on, blocked_issues, date_from,
         add_links=args.add_links, show_commits=show_commits,
         done_commits=done_commits, orphan_commits=orphan_commits,
     )
@@ -691,7 +693,7 @@ def main() -> None:
             sys.exit(1)
         slack_text = build_slack_report(
             done_issues, review_issues, worked_on, blocked_issues,
-            backlog_issues, commits_by_ticket, orphan_commits, workday,
+            backlog_issues, commits_by_ticket, orphan_commits, date_from,
             show_commits=show_commits, done_commits=done_commits,
         )
         try:
