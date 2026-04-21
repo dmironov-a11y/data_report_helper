@@ -79,6 +79,20 @@ def plane_get(path: str, params: Optional[dict] = None) -> dict:
     return resp.json()
 
 
+def plane_patch(path: str, data: dict) -> dict:
+    url = f"{PLANE_BASE_URL}{path}"
+    for attempt in range(3):
+        resp = requests.patch(url, headers=plane_headers(), json=data, timeout=15)
+        if resp.status_code == 429:
+            wait = int(resp.headers.get("Retry-After", 5))
+            time.sleep(wait)
+            continue
+        resp.raise_for_status()
+        return resp.json()
+    resp.raise_for_status()
+    return resp.json()
+
+
 def get_me() -> dict:
     """Return the current authenticated user."""
     return plane_get("/users/me/")
@@ -658,6 +672,157 @@ def build_report(
 # Main
 # ---------------------------------------------------------------------------
 
+RENAME_SYSTEM_PROMPT = """You rename tasks for a payment analytics dashboard called Paynext.
+App tabs/areas: Payments, Declines, 3DS, BIN, Filters, Subscriptions, Tinybird, Metrics.
+
+Naming convention:
+  [Type] Area: Short Description
+
+Type tags (always present, Title Case):
+  [Chart]    — new or updated chart/dashboard UI
+  [Feature]  — business feature (filters, drill-down, new tab, new capability)
+  [Fix]      — bug or incorrect logic/calculation
+  [BE]       — Tinybird endpoint, pipeline, data transformation, refactor
+  [FE]       — frontend implementation (React components, UI wiring, prod deploy)
+  [Research] — investigation, benchmark, validation with BQ/stakeholders
+  [Doc]      — documentation, tooltips, descriptions, specs
+  [QA]       — testing, comparison with BigQuery, load testing
+  [Infra]    — infrastructure (workspace setup, alerting, MCP, monitoring)
+
+Rules:
+- Type tag always present, Title Case: [Chart] not [chart] or [CHART]
+- Area after bracket: short name from the list above (Payments, Declines, 3DS, BIN, Filters, Subscriptions, Tinybird, Metrics, Infra)
+- Multi-area example: [Chart] Payments, Declines: Add Failed Charts
+- Strong verb + object after colon, concise, Title Case, no filler words
+- No arrows (=>), no dashes as separators, no all-caps except acronyms (BIN, MCP, SQL, DRY, BQ)
+- Max ~80 chars total
+- [FE] vs [Chart]: use [FE] for implementing/wiring UI code; use [Chart] for the chart spec/metric/design work
+- Return ONLY the renamed title, nothing else."""
+
+def ai_rename(title: str, is_subtask: bool = False) -> str:
+    """Call local claude CLI to rename a task title."""
+    task_hint = (
+        "This is a SUB-TASK (has a parent task). Pick the most specific type: [BE], [FE], [Chart], [Fix], [QA], [Doc]."
+        if is_subtask else
+        "This is a TOP-LEVEL task (no parent). Lean toward [Feature] or [Research] unless it is clearly a bug ([Fix]), infra ([Infra]), or purely technical ([BE])."
+    )
+    prompt = f'Rename this task title following the convention.\n\n{task_hint}\n\nOriginal: "{title}"\n\nRenamed:'
+    result = subprocess.run(
+        ["claude", "--print", "--system-prompt", RENAME_SYSTEM_PROMPT, prompt],
+        capture_output=True, text=True, timeout=30,
+    )
+    renamed = result.stdout.strip().strip("`\"'")
+    return renamed if renamed else title
+
+
+def run_rename_mode(projects: list[dict], dry_run: bool, cycle_filter: str = "next") -> None:
+    """Fetch issues from the selected cycle(s) and propose AI renames.
+
+    cycle_filter: "next" (default) | "current" | "both"
+    """
+    label_map = {"next": "next cycle", "current": "current cycle", "both": "current + next cycles"}
+    print(f"\nFetching issues from {label_map.get(cycle_filter, cycle_filter)} for rename...", file=sys.stderr)
+
+    for project in projects:
+        project_id = project["id"]
+        cycles = get_cycles(project_id)
+        states = get_states(project_id)
+
+        now_iso = datetime.now(timezone.utc).isoformat()
+
+        def cycle_status(c: dict) -> str:
+            s = c.get("start_date") or ""
+            e = c.get("end_date") or ""
+            st = c.get("status")
+            if st:
+                return st
+            if s and e:
+                if s <= now_iso <= e:
+                    return "CURRENT"
+                elif s > now_iso:
+                    return "UPCOMING"
+                else:
+                    return "COMPLETED"
+            return "DRAFT"
+
+        current = next((c for c in cycles if cycle_status(c) == "CURRENT"), None)
+        upcoming = [c for c in cycles if cycle_status(c) == "UPCOMING"]
+        nxt = min(upcoming, key=lambda c: c.get("start_date") or "", default=None)
+
+        selected_cycles: list[dict] = []
+        if cycle_filter == "current":
+            selected_cycles = [c for c in [current] if c]
+        elif cycle_filter == "next":
+            selected_cycles = [c for c in [nxt] if c]
+        else:  # both
+            selected_cycles = [c for c in [current, nxt] if c]
+
+        all_issues: dict[str, dict] = {}  # id -> issue
+        for cycle in selected_cycles:
+            cycle_name = cycle.get("name", cycle["id"])
+            print(f"  Cycle: {cycle_name}", file=sys.stderr)
+            for issue in get_cycle_issues(project_id, cycle["id"]):
+                all_issues[issue["id"]] = issue
+
+        if not all_issues:
+            print(f"No issues found in {label_map.get(cycle_filter, cycle_filter)}.", file=sys.stderr)
+            return
+
+        identifier = project.get("identifier", "??")
+        proposals: list[tuple[dict, str]] = []  # (issue, new_name)
+
+        print(f"\nGenerating rename proposals for {len(all_issues)} issues...\n")
+        for issue in sorted(all_issues.values(), key=lambda i: i.get("sequence_id", 0)):
+            original = issue.get("name", "")
+            seq = issue.get("sequence_id", "?")
+            print(f"  {identifier}-{seq}  {original}", file=sys.stderr)
+            is_subtask = bool(issue.get("parent"))
+            renamed = ai_rename(original, is_subtask=is_subtask)
+            proposals.append((issue, renamed))
+
+        print("\n" + "─" * 72)
+        print(f"{'TICKET':<12} {'ORIGINAL':<40} {'PROPOSED'}")
+        print("─" * 72)
+        for issue, renamed in proposals:
+            seq = issue.get("sequence_id", "?")
+            original = issue.get("name", "")
+            changed = renamed != original
+            marker = " *" if changed else ""
+            orig_short = original[:38] + ".." if len(original) > 40 else original
+            print(f"{identifier}-{seq:<8} {orig_short:<40} {renamed}{marker}")
+        print("─" * 72)
+
+        changed = [(i, r) for i, r in proposals if r != i.get("name", "")]
+        print(f"\n{len(changed)} of {len(proposals)} titles would change.")
+
+        if dry_run:
+            print("\n[dry-run] No changes applied. Remove --dry-run to apply.")
+            return
+
+        if not changed:
+            print("Nothing to update.")
+            return
+
+        confirm = input(f"\nApply {len(changed)} renames to Plane? [y/N] ").strip().lower()
+        if confirm != "y":
+            print("Aborted.")
+            return
+
+        print("\nApplying renames...")
+        for issue, renamed in changed:
+            seq = issue.get("sequence_id", "?")
+            try:
+                plane_patch(
+                    f"/workspaces/{PLANE_WORKSPACE_SLUG}/projects/{project_id}/work-items/{issue['id']}/",
+                    {"name": renamed},
+                )
+                print(f"  ✓ {identifier}-{seq}: {renamed}")
+            except requests.HTTPError as exc:
+                print(f"  ✗ {identifier}-{seq}: {exc}", file=sys.stderr)
+
+        print(f"\nDone. {len(changed)} issues renamed.")
+
+
 def validate_config() -> bool:
     errors = []
     if not PLANE_API_KEY:
@@ -719,6 +884,28 @@ def main() -> None:
             "If --slack is also set, sends the cycles report to your Slack DM."
         ),
     )
+    parser.add_argument(
+        "--rename-tasks",
+        action="store_true",
+        default=False,
+        help=(
+            "AI-powered rename of issues in current+next cycles. "
+            "Shows proposals and asks for confirmation before applying. "
+            "Use with --dry-run to only preview without applying."
+        ),
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        default=False,
+        help="With --rename-tasks: show proposals but do not apply changes.",
+    )
+    parser.add_argument(
+        "--cycle",
+        choices=["next", "current", "both"],
+        default="next",
+        help="With --rename-tasks: which cycle(s) to rename. Default: next.",
+    )
     args = parser.parse_args()
     # Expand 'all' into all groups
     show_commits: set[str] = {"done", "in_progress", "orphan"} if "all" in args.commits else set(args.commits)
@@ -748,6 +935,15 @@ def main() -> None:
     except requests.HTTPError as exc:
         print(f"[ERROR] Plane API error: {exc}", file=sys.stderr)
         sys.exit(1)
+
+    # Rename mode — run standalone, skip standup flow
+    if args.rename_tasks:
+        try:
+            run_rename_mode(projects, dry_run=args.dry_run, cycle_filter=args.cycle)
+        except requests.HTTPError as exc:
+            print(f"[ERROR] Plane API error: {exc}", file=sys.stderr)
+            sys.exit(1)
+        return
 
     # Cycles mode — run standalone, skip standup flow
     if args.cycles:

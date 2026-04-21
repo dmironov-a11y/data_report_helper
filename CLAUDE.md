@@ -15,6 +15,10 @@ uv run standup.py --commits all                      # show commits for all grou
 uv run standup.py --standup-date 2026-03-25 --slack --commits all --add-links      # full featured run
 uv run standup.py --cycles                           # show current + next cycle issues in terminal
 uv run standup.py --cycles --slack                   # send cycles report to Slack DM
+uv run standup.py --rename-tasks --dry-run           # AI rename proposals for next cycle (no changes applied)
+uv run standup.py --rename-tasks --dry-run --cycle current   # same for current cycle
+uv run standup.py --rename-tasks --dry-run --cycle both      # both cycles
+uv run standup.py --rename-tasks                     # propose + confirm + apply renames to Plane
 ```
 
 ## Environment setup
