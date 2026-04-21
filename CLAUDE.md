@@ -13,6 +13,8 @@ uv run standup.py --commits in_progress              # show commits under in-pro
 uv run standup.py --commits done in_progress         # show commits under done + in-progress
 uv run standup.py --commits all                      # show commits for all groups + orphans
 uv run standup.py --standup-date 2026-03-25 --slack --commits all --add-links      # full featured run
+uv run standup.py --cycles                           # show current + next cycle issues in terminal
+uv run standup.py --cycles --slack                   # send cycles report to Slack DM
 ```
 
 ## Environment setup
@@ -26,7 +28,11 @@ Copy `.env.example` to `.env` and fill in credentials. Required variables:
 
 ## Architecture
 
-Single-file script (`standup.py`) with three data sources:
+Single-file script (`standup.py`) with two modes: **standup** (default) and **cycles** (`--cycles`).
+
+### Standup mode (default)
+
+Data sources:
 
 1. **Plane.so API** — fetches authenticated user via `/users/me/`, then paginates all issues for the configured project and filters client-side by assignee (the API ignores the `assignees` query param). Issues are classified by `state.group` and `updated_at` date.
 
@@ -36,7 +42,7 @@ Single-file script (`standup.py`) with three data sources:
 
 4. **Slack sender** — builds a separate mrkdwn-formatted message with clickable `<url|DATA-XXX>` links and linked commit SHAs, sends via `chat.postMessage` to the user's DM.
 
-### Issue classification order (order matters)
+#### Issue classification order (order matters)
 
 ```
 backlog/unstarted  → backlog list (shown in terminal only, regardless of updated_at)
@@ -47,7 +53,7 @@ blocked label      → blocked list
 started            → plane_active (merged with GitHub commits into worked_on)
 ```
 
-### Commit groups (`--commits`)
+#### Commit groups (`--commits`)
 
 | Group        | Description                                      |
 |--------------|--------------------------------------------------|
@@ -56,12 +62,29 @@ started            → plane_active (merged with GitHub commits into worked_on)
 | `orphan`     | Commits with no DATA-XXXX ticket in message      |
 | `all`        | Shorthand for all three groups above             |
 
-### Output
+#### Output
 
 - Full report printed to stdout
 - Report body (without header line) copied to macOS clipboard via `pbcopy`
 - Backlog printed to terminal after the report (not copied)
 - If `--slack` is set: separate mrkdwn-formatted message sent to your Slack DM
+
+### Cycles mode (`--cycles`)
+
+Skips standup flow entirely. Fetches current and next sprint cycles from Plane and sends them as **two separate Slack messages**.
+
+1. **Cycle detection** — calls `/cycles/` for the project, determines current (`start_date ≤ now ≤ end_date`) and next (nearest upcoming by `start_date`) cycles. `status` field from API may be `null`, so dates are used as fallback.
+
+2. **Issues** — fetches all issues in each cycle via `/cycles/{id}/cycle-issues/`. One request per cycle (no pagination needed for typical cycle sizes).
+
+3. **Tree rendering** — issues are displayed as a parent→children tree:
+   - If a child's parent is in the same cycle, it's nested under the parent with `↳`
+   - If a parent is referenced but not in the cycle, it's fetched individually and used as a synthetic root node
+   - Issues that are children of a known parent are excluded from the flat top-level list (no duplicates)
+
+4. **Members** — workspace members are fetched once via `/workspaces/{slug}/members/` to resolve assignee UUIDs to `display_name`.
+
+5. **Output** — two mrkdwn messages (current cycle, next cycle), each grouped by state group (completed / started / unstarted / backlog / cancelled) with progress counter.
 
 # important-instruction-reminders
 Do what has been asked; nothing more, nothing less.

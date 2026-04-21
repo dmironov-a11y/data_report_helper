@@ -24,6 +24,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from collections import OrderedDict
 from datetime import date, datetime, timedelta, timezone
 from typing import Optional
@@ -66,7 +67,14 @@ def plane_headers() -> dict:
 
 def plane_get(path: str, params: Optional[dict] = None) -> dict:
     url = f"{PLANE_BASE_URL}{path}"
-    resp = requests.get(url, headers=plane_headers(), params=params, timeout=15)
+    for attempt in range(3):
+        resp = requests.get(url, headers=plane_headers(), params=params, timeout=15)
+        if resp.status_code == 429:
+            wait = int(resp.headers.get("Retry-After", 5))
+            time.sleep(wait)
+            continue
+        resp.raise_for_status()
+        return resp.json()
     resp.raise_for_status()
     return resp.json()
 
@@ -122,6 +130,34 @@ def get_my_issues(project_id: str, member_id: str) -> list[dict]:
         return False
 
     return [issue for issue in all_issues if is_assigned(issue)]
+
+
+def get_issue_by_id(project_id: str, issue_id: str) -> dict:
+    """Fetch a single issue by id."""
+    return plane_get(f"/workspaces/{PLANE_WORKSPACE_SLUG}/projects/{project_id}/work-items/{issue_id}/")
+
+
+def get_workspace_members() -> dict[str, str]:
+    """Return a dict of member_id -> display_name for all workspace members."""
+    data = plane_get(f"/workspaces/{PLANE_WORKSPACE_SLUG}/members/")
+    members = data.get("results", data) if isinstance(data, dict) else data
+    return {m["id"]: m.get("display_name") or m.get("email", m["id"]) for m in members}
+
+
+def get_cycles(project_id: str) -> list[dict]:
+    """Return all cycles for a project."""
+    data = plane_get(f"/workspaces/{PLANE_WORKSPACE_SLUG}/projects/{project_id}/cycles/")
+    return data.get("results", data) if isinstance(data, dict) else data
+
+
+def get_cycle_issues(project_id: str, cycle_id: str) -> list[dict]:
+    """Return all issues in a cycle."""
+    data = plane_get(
+        f"/workspaces/{PLANE_WORKSPACE_SLUG}/projects/{project_id}/cycles/{cycle_id}/cycle-issues/",
+    )
+    if isinstance(data, list):
+        return data
+    return data.get("results", [])
 
 
 def get_issue_identifier(project: dict, issue: dict) -> str:
@@ -386,6 +422,133 @@ def build_slack_report(
     return "\n".join(lines)
 
 
+def _build_cycle_message(
+    cycle: dict | None,
+    issues: list[dict],
+    label: str,
+    project: dict,
+    states: dict[str, dict],
+    members: dict[str, str],
+) -> str:
+    """Build a single Slack message for one cycle, showing issues as a parent→children tree."""
+    lines = []
+
+    if not cycle:
+        return f"*{label}*\nNo cycle found."
+
+    def fmt_date(d: str | None) -> str:
+        return d[:10] if d else "?"
+
+    def render_issue(issue: dict, indent: str = "  ") -> str:
+        identifier = get_issue_identifier(project, issue)
+        title = issue.get("name", issue.get("title", "Untitled"))
+        issue_id = issue.get("id", "")
+        url = build_issue_url(project["id"], issue_id)
+        state_id = issue.get("state")
+        state = states.get(state_id, {})
+        state_name = state.get("name", "?")
+        assignee_ids = issue.get("assignees", [])
+        assignee_names = [
+            members.get(a.get("id") if isinstance(a, dict) else a, "?")
+            for a in assignee_ids
+        ]
+        assignees_str = f" — _{', '.join(assignee_names)}_" if assignee_names else ""
+        return f"{indent}• <{url}|{identifier}> — {title} `{state_name}`{assignees_str}"
+
+    # Build lookup by id
+    issues_by_id: dict[str, dict] = {i["id"]: i for i in issues}
+
+    # Fetch missing parents (those referenced but not in cycle)
+    parent_ids = {i["parent"] for i in issues if i.get("parent") and i["parent"] not in issues_by_id}
+    for pid in parent_ids:
+        try:
+            parent_issue = get_issue_by_id(project["id"], pid)
+            issues_by_id[pid] = parent_issue
+        except Exception:
+            pass
+
+    # Build children map
+    children: dict[str, list[dict]] = {}
+    for issue in issues:
+        p = issue.get("parent")
+        if p:
+            children.setdefault(p, []).append(issue)
+
+    # Top-level: no parent, or parent unknown (not in cycle AND not fetched externally)
+    cycle_ids = {i["id"] for i in issues}
+    known_parent_ids = cycle_ids | set(issues_by_id.keys())
+    top_level = [i for i in issues if not i.get("parent") or i["parent"] not in known_parent_ids]
+
+    # Group top-level by state group
+    by_state: dict[str, list[dict]] = {}
+    for issue in top_level:
+        state_id = issue.get("state")
+        group = states.get(state_id, {}).get("group", "other")
+        by_state.setdefault(group, []).append(issue)
+
+    # For parent issues fetched externally, determine their group
+    for pid, parent_issue in issues_by_id.items():
+        if pid not in cycle_ids:
+            state_id = parent_issue.get("state")
+            group = states.get(state_id, {}).get("group", "other")
+            by_state.setdefault(group, [])
+            # insert if not already present as top-level
+            if parent_issue not in by_state[group]:
+                by_state[group].append(parent_issue)
+
+    name = cycle.get("name", "Unnamed")
+    start = fmt_date(cycle.get("start_date"))
+    end = fmt_date(cycle.get("end_date"))
+    total = cycle.get("total_issues", len(issues))
+    completed = cycle.get("completed_issues", 0)
+    lines.append(f"*{label}: {name}* ({start} → {end})")
+    lines.append(f"Progress: {completed}/{total} issues completed\n")
+
+    order = ["completed", "started", "unstarted", "backlog", "cancelled"]
+    group_emoji = {
+        "completed": ":white_check_mark:",
+        "started": ":arrows_counterclockwise:",
+        "unstarted": ":white_circle:",
+        "backlog": ":black_circle:",
+        "cancelled": ":x:",
+    }
+    for group in order:
+        group_issues = by_state.get(group, [])
+        if not group_issues:
+            continue
+        emoji = group_emoji.get(group, ":small_blue_diamond:")
+        lines.append(f"{emoji} *{group.capitalize()}* ({len(group_issues)})")
+        for issue in sorted(group_issues, key=lambda i: i.get("sequence_id", 0)):
+            lines.append(render_issue(issue, indent="  "))
+            for child in sorted(children.get(issue["id"], []), key=lambda i: i.get("sequence_id", 0)):
+                lines.append(render_issue(child, indent="      ↳ "))
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+def build_cycle_messages(
+    current_cycle: dict | None,
+    current_issues: list[dict],
+    next_cycle: dict | None,
+    next_issues: list[dict],
+    project: dict,
+    states: dict[str, dict],
+    members: dict[str, str] | None = None,
+) -> tuple[str, str]:
+    """Return (current_msg, next_msg) as two separate Slack messages."""
+    members = members or {}
+    current_msg = _build_cycle_message(
+        current_cycle, current_issues, ":large_green_circle: Current Cycle",
+        project, states, members,
+    )
+    next_msg = _build_cycle_message(
+        next_cycle, next_issues, ":large_yellow_circle: Next Cycle",
+        project, states, members,
+    )
+    return current_msg, next_msg
+
+
 def send_to_slack(text: str, bot_token: str, user_id: str) -> None:
     """Send a DM to user_id via Slack Web API (user ID used directly as channel)."""
     headers = {
@@ -547,6 +710,15 @@ def main() -> None:
             "Can combine: --commits in_progress orphan. Default: no commits shown."
         ),
     )
+    parser.add_argument(
+        "--cycles",
+        action="store_true",
+        default=False,
+        help=(
+            "Show current and next sprint cycles from Plane with all issues. "
+            "If --slack is also set, sends the cycles report to your Slack DM."
+        ),
+    )
     args = parser.parse_args()
     # Expand 'all' into all groups
     show_commits: set[str] = {"done", "in_progress", "orphan"} if "all" in args.commits else set(args.commits)
@@ -576,6 +748,78 @@ def main() -> None:
     except requests.HTTPError as exc:
         print(f"[ERROR] Plane API error: {exc}", file=sys.stderr)
         sys.exit(1)
+
+    # Cycles mode — run standalone, skip standup flow
+    if args.cycles:
+        print("\nFetching Plane cycles...", file=sys.stderr)
+        try:
+            for project in projects:
+                project_id = project["id"]
+                states = get_states(project_id)
+                cycles = get_cycles(project_id)
+
+                now_iso = datetime.now(timezone.utc).isoformat()
+
+                def cycle_status(c: dict) -> str:
+                    s = c.get("start_date") or ""
+                    e = c.get("end_date") or ""
+                    st = c.get("status")
+                    if st:
+                        return st
+                    if s and e:
+                        if s <= now_iso <= e:
+                            return "CURRENT"
+                        elif s > now_iso:
+                            return "UPCOMING"
+                        else:
+                            return "COMPLETED"
+                    return "DRAFT"
+
+                current_cycle = next(
+                    (c for c in cycles if cycle_status(c) == "CURRENT"), None
+                )
+                upcoming = [c for c in cycles if cycle_status(c) == "UPCOMING"]
+                next_cycle = min(upcoming, key=lambda c: c.get("start_date") or "", default=None)
+
+                current_issues = (
+                    get_cycle_issues(project_id, current_cycle["id"]) if current_cycle else []
+                )
+                next_issues = (
+                    get_cycle_issues(project_id, next_cycle["id"]) if next_cycle else []
+                )
+
+                workspace_members = get_workspace_members()
+
+                current_msg, next_msg = build_cycle_messages(
+                    current_cycle, current_issues,
+                    next_cycle, next_issues,
+                    project, states,
+                    members=workspace_members,
+                )
+
+                for msg in (current_msg, next_msg):
+                    print("\n" + msg.replace("*", "").replace("_", "").replace("`", ""))
+
+                if args.slack:
+                    token = SLACK_BOT_TOKEN
+                    user_id = SLACK_USER_ID
+                    if not token:
+                        print("[ERROR] SLACK_BOT_TOKEN is not set", file=sys.stderr)
+                        sys.exit(1)
+                    if not user_id:
+                        print("[ERROR] SLACK_USER_ID is not set", file=sys.stderr)
+                        sys.exit(1)
+                    try:
+                        send_to_slack(current_msg, token, user_id)
+                        send_to_slack(next_msg, token, user_id)
+                        print("✓ Cycles report sent to Slack (2 messages)", file=sys.stderr)
+                    except Exception as exc:
+                        print(f"[ERROR] Failed to send cycles report to Slack: {exc}", file=sys.stderr)
+                        sys.exit(1)
+        except requests.HTTPError as exc:
+            print(f"[ERROR] Plane API error fetching cycles: {exc}", file=sys.stderr)
+            sys.exit(1)
+        return
 
     done_issues: list[tuple[str, str, str]] = []    # (identifier, title, url)
     review_issues: list[tuple[str, str, str]] = []
