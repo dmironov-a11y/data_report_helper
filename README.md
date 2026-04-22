@@ -86,6 +86,14 @@ uv run standup.py --standup-date 2026-03-17 --commits in_progress --add-links
 uv run standup.py --slack --add-links --commits all
 ```
 
+sprint mode
+
+```
+     uv run sprints.py                          # cycles view (terminal only)
+     uv run sprints.py --slack                  # send cycles to Slack
+     uv run sprints.py --rename-tasks --dry-run
+     uv run sprints.py --rename-tasks --dry-run --cycle current
+```
 ## Output
 
 - **Terminal** — full plain-text report + backlog section

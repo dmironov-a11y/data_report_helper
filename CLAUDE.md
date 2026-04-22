@@ -2,7 +2,9 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## Running the script
+## Running the scripts
+
+### standup.py — daily standup report
 
 ```bash
 uv run standup.py                                    # report for previous working day
@@ -13,12 +15,17 @@ uv run standup.py --commits in_progress              # show commits under in-pro
 uv run standup.py --commits done in_progress         # show commits under done + in-progress
 uv run standup.py --commits all                      # show commits for all groups + orphans
 uv run standup.py --standup-date 2026-03-25 --slack --commits all --add-links      # full featured run
-uv run standup.py --cycles                           # show current + next cycle issues in terminal
-uv run standup.py --cycles --slack                   # send cycles report to Slack DM
-uv run standup.py --rename-tasks --dry-run           # AI rename proposals for next cycle (no changes applied)
-uv run standup.py --rename-tasks --dry-run --cycle current   # same for current cycle
-uv run standup.py --rename-tasks --dry-run --cycle both      # both cycles
-uv run standup.py --rename-tasks                     # propose + confirm + apply renames to Plane
+```
+
+### sprints.py — sprint cycles view + rename
+
+```bash
+uv run sprints.py                                    # show current + next cycle issues in terminal
+uv run sprints.py --slack                            # send cycles report to Slack DM
+uv run sprints.py --rename-tasks --dry-run           # AI rename proposals for next cycle (no changes applied)
+uv run sprints.py --rename-tasks --dry-run --cycle current   # same for current cycle
+uv run sprints.py --rename-tasks --dry-run --cycle both      # both cycles
+uv run sprints.py --rename-tasks                     # propose + confirm + apply renames to Plane
 ```
 
 ## Environment setup
@@ -32,7 +39,20 @@ Copy `.env.example` to `.env` and fill in credentials. Required variables:
 
 ## Architecture
 
-Single-file script (`standup.py`) with three modes: **standup** (default), **cycles** (`--cycles`), and **rename** (`--rename-tasks`).
+Two entry points with shared `lib/` package:
+- `standup.py` — standup mode only
+- `sprints.py` — cycles view (default) + rename mode (`--rename-tasks`)
+
+```
+lib/
+  config.py   # env constants, validate_config, parse_date_arg
+  plane.py    # Plane API helpers (plane_get, plane_patch, get_*, build_issue_url...)
+  github.py   # GitHub helpers (get_github_commits, TICKET_RE, ...)
+  slack.py    # send_to_slack
+  report.py   # build_report, build_slack_report, prev_workday, workday_range
+  cycles.py   # _build_cycle_message, build_cycle_messages
+  rename.py   # RENAME_SYSTEM_PROMPT, ai_rename, run_rename_mode
+```
 
 ### Standup mode (default)
 
@@ -73,9 +93,9 @@ started            → plane_active (merged with GitHub commits into worked_on)
 - Backlog printed to terminal after the report (not copied)
 - If `--slack` is set: separate mrkdwn-formatted message sent to your Slack DM
 
-### Cycles mode (`--cycles`)
+### Cycles mode (sprints.py default)
 
-Skips standup flow entirely. Fetches current and next sprint cycles from Plane and sends them as **two separate Slack messages**.
+Fetches current and next sprint cycles from Plane and sends them as **two separate Slack messages**.
 
 1. **Cycle detection** — calls `/cycles/` for the project, determines current (`start_date ≤ now ≤ end_date`) and next (nearest upcoming by `start_date`) cycles. `status` field from API may be `null`, so dates are used as fallback.
 
@@ -90,9 +110,9 @@ Skips standup flow entirely. Fetches current and next sprint cycles from Plane a
 
 5. **Output** — two mrkdwn messages (current cycle, next cycle), each grouped by state group (completed / started / unstarted / backlog / cancelled) with progress counter.
 
-### Rename mode (`--rename-tasks`)
+### Rename mode (sprints.py --rename-tasks)
 
-Skips standup flow entirely. Uses local `claude` CLI (no API key needed, uses subscription) to propose AI-generated renames for issues in the selected cycle, then optionally applies them to Plane via PATCH.
+Uses local `claude` CLI (no API key needed, uses subscription) to propose AI-generated renames for issues in the selected cycle, then optionally applies them to Plane via PATCH.
 
 #### Flags
 
