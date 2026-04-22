@@ -453,7 +453,7 @@ def _build_cycle_message(
     def fmt_date(d: str | None) -> str:
         return d[:10] if d else "?"
 
-    def render_issue(issue: dict, indent: str = "  ") -> str:
+    def render_issue(issue: dict, indent: str = "  ", prefix: str = "") -> str:
         identifier = get_issue_identifier(project, issue)
         title = issue.get("name", issue.get("title", "Untitled"))
         issue_id = issue.get("id", "")
@@ -467,7 +467,7 @@ def _build_cycle_message(
             for a in assignee_ids
         ]
         assignees_str = f" — _{', '.join(assignee_names)}_" if assignee_names else ""
-        return f"{indent}• <{url}|{identifier}> — {title} `{state_name}`{assignees_str}"
+        return f"{indent}• {prefix}<{url}|{identifier}> — {title} `{state_name}`{assignees_str}"
 
     # Build lookup by id
     issues_by_id: dict[str, dict] = {i["id"]: i for i in issues}
@@ -488,27 +488,41 @@ def _build_cycle_message(
         if p:
             children.setdefault(p, []).append(issue)
 
-    # Top-level: no parent, or parent unknown (not in cycle AND not fetched externally)
     cycle_ids = {i["id"] for i in issues}
     known_parent_ids = cycle_ids | set(issues_by_id.keys())
-    top_level = [i for i in issues if not i.get("parent") or i["parent"] not in known_parent_ids]
+    external_parent_ids = {pid for pid in issues_by_id if pid not in cycle_ids}
 
-    # Group top-level by state group
-    by_state: dict[str, list[dict]] = {}
-    for issue in top_level:
+    # Count ALL cycle issues by their own state group (for accurate headers)
+    group_counts: dict[str, int] = {}
+    for issue in issues:
         state_id = issue.get("state")
         group = states.get(state_id, {}).get("group", "other")
-        by_state.setdefault(group, []).append(issue)
+        group_counts[group] = group_counts.get(group, 0) + 1
 
-    # For parent issues fetched externally, determine their group
-    for pid, parent_issue in issues_by_id.items():
-        if pid not in cycle_ids:
-            state_id = parent_issue.get("state")
-            group = states.get(state_id, {}).get("group", "other")
-            by_state.setdefault(group, [])
-            # insert if not already present as top-level
-            if parent_issue not in by_state[group]:
-                by_state[group].append(parent_issue)
+    # Build by_state grouped by each cycle issue's OWN state.
+    # Each entry is a list of render nodes:
+    #   ["issue", issue_dict]                        — plain cycle issue (no external parent)
+    #   ["wrapper", parent_dict, [child_dicts]]       — external parent + its cycle children in this group
+    by_state: dict[str, list[list]] = {}
+    for issue in issues:
+        parent_id = issue.get("parent")
+        state_id = issue.get("state")
+        group = states.get(state_id, {}).get("group", "other")
+
+        if parent_id and parent_id in cycle_ids:
+            # Parent is in cycle → rendered as child under parent, skip here
+            continue
+        elif parent_id and parent_id in external_parent_ids:
+            # External parent → add to a wrapper node in this group
+            entries = by_state.setdefault(group, [])
+            found = next((e for e in entries if e[0] == "wrapper" and e[1]["id"] == parent_id), None)
+            if found:
+                found[2].append(issue)
+            else:
+                entries.append(["wrapper", issues_by_id[parent_id], [issue]])
+        else:
+            # No parent or unknown parent → plain entry
+            by_state.setdefault(group, []).append(["issue", issue])
 
     name = cycle.get("name", "Unnamed")
     start = fmt_date(cycle.get("start_date"))
@@ -527,15 +541,29 @@ def _build_cycle_message(
         "cancelled": ":x:",
     }
     for group in order:
-        group_issues = by_state.get(group, [])
-        if not group_issues:
+        entries = by_state.get(group, [])
+        count = group_counts.get(group, 0)
+        if not entries and count == 0:
             continue
         emoji = group_emoji.get(group, ":small_blue_diamond:")
-        lines.append(f"{emoji} *{group.capitalize()}* ({len(group_issues)})")
-        for issue in sorted(group_issues, key=lambda i: i.get("sequence_id", 0)):
-            lines.append(render_issue(issue, indent="  "))
-            for child in sorted(children.get(issue["id"], []), key=lambda i: i.get("sequence_id", 0)):
-                lines.append(render_issue(child, indent="      ↳ "))
+        lines.append(f"{emoji} *{group.capitalize()}* ({count})")
+        # Sort entries: plain issues by sequence_id, wrappers by their first child's sequence_id
+        def entry_sort_key(e: list) -> int:
+            if e[0] == "issue":
+                return e[1].get("sequence_id", 0)
+            else:
+                return min(c.get("sequence_id", 0) for c in e[2]) if e[2] else 0
+        for entry in sorted(entries, key=entry_sort_key):
+            if entry[0] == "issue":
+                issue = entry[1]
+                lines.append(render_issue(issue, indent="  "))
+                for child in sorted(children.get(issue["id"], []), key=lambda i: i.get("sequence_id", 0)):
+                    lines.append(render_issue(child, indent="      ↳ "))
+            else:
+                _, parent, group_children = entry
+                lines.append(render_issue(parent, indent="  ", prefix="🏷️ "))
+                for child in sorted(group_children, key=lambda i: i.get("sequence_id", 0)):
+                    lines.append(render_issue(child, indent="      ↳ "))
         lines.append("")
 
     return "\n".join(lines)
@@ -699,20 +727,29 @@ Rules:
 - [FE] vs [Chart]: use [FE] for implementing/wiring UI code; use [Chart] for the chart spec/metric/design work
 - Return ONLY the renamed title, nothing else."""
 
-def ai_rename(title: str, is_subtask: bool = False) -> str:
+def ai_rename(title: str, is_subtask: bool = False, description: str = "") -> str:
     """Call local claude CLI to rename a task title."""
     task_hint = (
         "This is a SUB-TASK (has a parent task). Pick the most specific type: [BE], [FE], [Chart], [Fix], [QA], [Doc]."
         if is_subtask else
         "This is a TOP-LEVEL task (no parent). Lean toward [Feature] or [Research] unless it is clearly a bug ([Fix]), infra ([Infra]), or purely technical ([BE])."
     )
-    prompt = f'Rename this task title following the convention.\n\n{task_hint}\n\nOriginal: "{title}"\n\nRenamed:'
-    result = subprocess.run(
-        ["claude", "--print", "--system-prompt", RENAME_SYSTEM_PROMPT, prompt],
-        capture_output=True, text=True, timeout=30,
-    )
-    renamed = result.stdout.strip().strip("`\"'")
-    return renamed if renamed else title
+    desc_section = f'\n\nDescription (first 300 chars):\n{description[:300]}' if description else ""
+    prompt = f'Rename this task title following the convention.\n\n{task_hint}{desc_section}\n\nOriginal: "{title}"\n\nRenamed:'
+    for attempt in range(3):
+        try:
+            result = subprocess.run(
+                ["claude", "--print", "--system-prompt", RENAME_SYSTEM_PROMPT, prompt],
+                capture_output=True, text=True, timeout=60,
+            )
+            renamed = result.stdout.strip().strip("`\"'")
+            return renamed if renamed else title
+        except subprocess.TimeoutExpired:
+            if attempt < 2:
+                print(f"  [warn] claude timeout, retrying ({attempt + 2}/3)...", file=sys.stderr)
+            else:
+                print(f"  [warn] claude timed out 3 times, keeping original", file=sys.stderr)
+    return title
 
 
 def run_rename_mode(projects: list[dict], dry_run: bool, cycle_filter: str = "next") -> None:
@@ -777,7 +814,8 @@ def run_rename_mode(projects: list[dict], dry_run: bool, cycle_filter: str = "ne
             seq = issue.get("sequence_id", "?")
             print(f"  {identifier}-{seq}  {original}", file=sys.stderr)
             is_subtask = bool(issue.get("parent"))
-            renamed = ai_rename(original, is_subtask=is_subtask)
+            description = issue.get("description_stripped", "") or ""
+            renamed = ai_rename(original, is_subtask=is_subtask, description=description)
             proposals.append((issue, renamed))
 
         print("\n" + "─" * 72)

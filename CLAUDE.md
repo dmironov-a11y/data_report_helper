@@ -32,7 +32,7 @@ Copy `.env.example` to `.env` and fill in credentials. Required variables:
 
 ## Architecture
 
-Single-file script (`standup.py`) with two modes: **standup** (default) and **cycles** (`--cycles`).
+Single-file script (`standup.py`) with three modes: **standup** (default), **cycles** (`--cycles`), and **rename** (`--rename-tasks`).
 
 ### Standup mode (default)
 
@@ -89,6 +89,43 @@ Skips standup flow entirely. Fetches current and next sprint cycles from Plane a
 4. **Members** — workspace members are fetched once via `/workspaces/{slug}/members/` to resolve assignee UUIDs to `display_name`.
 
 5. **Output** — two mrkdwn messages (current cycle, next cycle), each grouped by state group (completed / started / unstarted / backlog / cancelled) with progress counter.
+
+### Rename mode (`--rename-tasks`)
+
+Skips standup flow entirely. Uses local `claude` CLI (no API key needed, uses subscription) to propose AI-generated renames for issues in the selected cycle, then optionally applies them to Plane via PATCH.
+
+#### Flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--cycle next` | ✓ | Rename issues in next cycle only |
+| `--cycle current` | | Rename issues in current cycle only |
+| `--cycle both` | | Rename issues in current + next cycles |
+| `--dry-run` | | Show proposals, do not apply or prompt |
+
+Without `--dry-run`: shows proposal table, then asks `[y/N]` confirmation before writing to Plane.
+
+#### Naming manifest
+
+Format: `[Type] Area: Short Description`
+
+| Tag | When to use |
+|-----|-------------|
+| `[Chart]` | New or updated chart/dashboard UI |
+| `[Feature]` | Business feature (filters, drill-down, new tab) |
+| `[Fix]` | Bug or incorrect logic/calculation |
+| `[BE]` | Tinybird endpoint, pipeline, data transformation |
+| `[FE]` | Frontend implementation (React, UI wiring, prod deploy) |
+| `[Research]` | Investigation, benchmark, validation with BQ/stakeholders |
+| `[Doc]` | Documentation, tooltips, descriptions |
+| `[QA]` | Testing, comparison with BigQuery |
+| `[Infra]` | Infrastructure (workspace, alerting, MCP setup) |
+
+Rules:
+- Type tag always present, Title Case (`[Chart]` not `[chart]`)
+- Area = short tab name: Payments, Declines, 3DS, BIN, Filters, Subscriptions, Tinybird, Metrics, Infra
+- Top-level tasks (no parent) → lean toward `[Feature]` / `[Research]`
+- Sub-tasks (has parent) → lean toward `[BE]` / `[FE]` / `[Chart]` / `[Fix]`
 
 # important-instruction-reminders
 Do what has been asked; nothing more, nothing less.
