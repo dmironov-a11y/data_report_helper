@@ -1,4 +1,4 @@
-from lib.plane import get_issue_by_id, get_issue_identifier, build_issue_url
+from lib.plane import get_issue_by_id, get_all_project_issues, get_issue_identifier, build_issue_url
 
 
 def _build_cycle_message(
@@ -9,7 +9,7 @@ def _build_cycle_message(
     states: dict[str, dict],
     members: dict[str, str],
 ) -> str:
-    """Build a single Slack message for one cycle, showing issues as a parent→children tree."""
+    """Build a single Slack message for one cycle: Epics block + flat state groups."""
     lines = []
 
     if not cycle:
@@ -18,7 +18,7 @@ def _build_cycle_message(
     def fmt_date(d: str | None) -> str:
         return d[:10] if d else "?"
 
-    def render_issue(issue: dict, indent: str = "  ", prefix: str = "") -> str:
+    def render_issue(issue: dict, indent: str = "  ") -> str:
         identifier = get_issue_identifier(project, issue)
         title = issue.get("name", issue.get("title", "Untitled"))
         issue_id = issue.get("id", "")
@@ -32,21 +32,34 @@ def _build_cycle_message(
             for a in assignee_ids
         ]
         assignees_str = f" — _{', '.join(assignee_names)}_" if assignee_names else ""
-        return f"{indent}• {prefix}<{url}|{identifier}> — {title} `{state_name}`{assignees_str}"
+        return f"{indent}• <{url}|{identifier}> — {title} `{state_name}`{assignees_str}"
 
-    # Build lookup by id
+    # Build lookup by id from cycle issues
     issues_by_id: dict[str, dict] = {i["id"]: i for i in issues}
 
-    # Fetch missing parents (those referenced but not in cycle)
+    # Fetch all project issues once — used to build full children map for epics
+    all_project_issues = get_all_project_issues(project["id"])
+    all_by_id: dict[str, dict] = {i["id"]: i for i in all_project_issues}
+
+    # Add missing parents (external) to issues_by_id
     parent_ids = {i["parent"] for i in issues if i.get("parent") and i["parent"] not in issues_by_id}
     for pid in parent_ids:
-        try:
-            parent_issue = get_issue_by_id(project["id"], pid)
-            issues_by_id[pid] = parent_issue
-        except Exception:
-            pass
+        if pid in all_by_id:
+            issues_by_id[pid] = all_by_id[pid]
+        else:
+            try:
+                issues_by_id[pid] = get_issue_by_id(project["id"], pid)
+            except Exception:
+                pass
 
-    # Build children map
+    # Build full children map from all project issues (not just cycle issues)
+    all_children: dict[str, list[dict]] = {}
+    for issue in all_project_issues:
+        p = issue.get("parent")
+        if p:
+            all_children.setdefault(p, []).append(issue)
+
+    # Build cycle-only children map (for flat list rendering reference)
     children: dict[str, list[dict]] = {}
     for issue in issues:
         p = issue.get("parent")
@@ -54,39 +67,28 @@ def _build_cycle_message(
             children.setdefault(p, []).append(issue)
 
     cycle_ids = {i["id"] for i in issues}
+
+    # In-cycle parents: cycle issues that have children also in cycle
+    in_cycle_parent_ids = {i["parent"] for i in issues if i.get("parent") and i["parent"] in cycle_ids}
+
+    # External parents: fetched from API, not in cycle themselves
     external_parent_ids = {pid for pid in issues_by_id if pid not in cycle_ids}
 
-    # Count ALL cycle issues by their own state group (for accurate headers)
-    group_counts: dict[str, int] = {}
-    for issue in issues:
-        state_id = issue.get("state")
-        group = states.get(state_id, {}).get("group", "other")
-        group_counts[group] = group_counts.get(group, 0) + 1
+    # All epics = union
+    epic_ids = in_cycle_parent_ids | external_parent_ids
 
-    # Build by_state grouped by each cycle issue's OWN state.
-    # Each entry is a list of render nodes:
-    #   ["issue", issue_dict]                        — plain cycle issue (no external parent)
-    #   ["wrapper", parent_dict, [child_dicts]]       — external parent + its cycle children in this group
-    by_state: dict[str, list[list]] = {}
-    for issue in issues:
-        parent_id = issue.get("parent")
-        state_id = issue.get("state")
-        group = states.get(state_id, {}).get("group", "other")
+    # Epic issue objects sorted by sequence_id
+    epics = [issues_by_id[eid] for eid in epic_ids if eid in issues_by_id]
+    epics.sort(key=lambda i: i.get("sequence_id", 0))
 
-        if parent_id and parent_id in cycle_ids:
-            # Parent is in cycle → rendered as child under parent, skip here
-            continue
-        elif parent_id and parent_id in external_parent_ids:
-            # External parent → add to a wrapper node in this group
-            entries = by_state.setdefault(group, [])
-            found = next((e for e in entries if e[0] == "wrapper" and e[1]["id"] == parent_id), None)
-            if found:
-                found[2].append(issue)
-            else:
-                entries.append(["wrapper", issues_by_id[parent_id], [issue]])
-        else:
-            # No parent or unknown parent → plain entry
-            by_state.setdefault(group, []).append(["issue", issue])
+    def subtask_summary(parent_id: str) -> str:
+        subs = all_children.get(parent_id, [])
+        done = sum(1 for s in subs if states.get(s.get("state"), {}).get("group") == "completed")
+        started = sum(1 for s in subs if states.get(s.get("state"), {}).get("group") == "started")
+        unstarted = sum(1 for s in subs if states.get(s.get("state"), {}).get("group") in ("unstarted", "backlog"))
+        n = len(subs)
+        word = "subtask" if n == 1 else "subtasks"
+        return f"    ↳ {done}/{n} {word}: {done} done, {started} started, {unstarted} unstarted"
 
     name = cycle.get("name", "Unnamed")
     start = fmt_date(cycle.get("start_date"))
@@ -95,6 +97,22 @@ def _build_cycle_message(
     completed = cycle.get("completed_issues", 0)
     lines.append(f"*{label}: {name}* ({start} → {end})")
     lines.append(f"Progress: {completed}/{total} issues completed\n")
+
+    # Epics block
+    if epics:
+        lines.append(f":dart: *Epics* ({len(epics)})")
+        for epic in epics:
+            lines.append(render_issue(epic, indent="  "))
+            lines.append(subtask_summary(epic["id"]))
+        lines.append("")
+
+    # Flat state groups — only non-epic cycle issues
+    flat_issues = [i for i in issues if i["id"] not in epic_ids]
+
+    by_state: dict[str, list[dict]] = {}
+    for issue in flat_issues:
+        group = states.get(issue.get("state"), {}).get("group", "other")
+        by_state.setdefault(group, []).append(issue)
 
     order = ["completed", "started", "unstarted", "backlog", "cancelled"]
     group_emoji = {
@@ -105,30 +123,13 @@ def _build_cycle_message(
         "cancelled": ":x:",
     }
     for group in order:
-        entries = by_state.get(group, [])
-        count = group_counts.get(group, 0)
-        if not entries and count == 0:
+        group_issues = sorted(by_state.get(group, []), key=lambda i: i.get("sequence_id", 0))
+        if not group_issues:
             continue
         emoji = group_emoji.get(group, ":small_blue_diamond:")
-        lines.append(f"{emoji} *{group.capitalize()}* ({count})")
-
-        def entry_sort_key(e: list) -> int:
-            if e[0] == "issue":
-                return e[1].get("sequence_id", 0)
-            else:
-                return min(c.get("sequence_id", 0) for c in e[2]) if e[2] else 0
-
-        for entry in sorted(entries, key=entry_sort_key):
-            if entry[0] == "issue":
-                issue = entry[1]
-                lines.append(render_issue(issue, indent="  "))
-                for child in sorted(children.get(issue["id"], []), key=lambda i: i.get("sequence_id", 0)):
-                    lines.append(render_issue(child, indent="      ↳ "))
-            else:
-                _, parent, group_children = entry
-                lines.append(render_issue(parent, indent="  ", prefix="🏷️ "))
-                for child in sorted(group_children, key=lambda i: i.get("sequence_id", 0)):
-                    lines.append(render_issue(child, indent="      ↳ "))
+        lines.append(f"{emoji} *{group.capitalize()}* ({len(group_issues)})")
+        for issue in group_issues:
+            lines.append(render_issue(issue, indent="  "))
         lines.append("")
 
     return "\n".join(lines)

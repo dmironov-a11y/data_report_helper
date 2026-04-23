@@ -98,6 +98,26 @@ def get_issue_by_id(project_id: str, issue_id: str) -> dict:
     return plane_get(f"/workspaces/{PLANE_WORKSPACE_SLUG}/projects/{project_id}/work-items/{issue_id}/")
 
 
+def get_all_project_issues(project_id: str) -> list[dict]:
+    """Fetch all issues in a project (paginated)."""
+    all_issues = []
+    page = 1
+    while True:
+        data = plane_get(
+            f"/workspaces/{PLANE_WORKSPACE_SLUG}/projects/{project_id}/work-items/",
+            params={"page": page},
+        )
+        if isinstance(data, list):
+            all_issues.extend(data)
+            break
+        results = data.get("results", [])
+        all_issues.extend(results)
+        if not data.get("next"):
+            break
+        page += 1
+    return all_issues
+
+
 def get_workspace_members() -> dict[str, str]:
     """Return a dict of member_id -> display_name for all workspace members."""
     data = plane_get(f"/workspaces/{PLANE_WORKSPACE_SLUG}/members/")
