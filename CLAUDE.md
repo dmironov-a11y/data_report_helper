@@ -26,6 +26,8 @@ uv run sprints.py --rename-tasks --dry-run           # AI rename proposals for n
 uv run sprints.py --rename-tasks --dry-run --cycle current   # same for current cycle
 uv run sprints.py --rename-tasks --dry-run --cycle both      # both cycles
 uv run sprints.py --rename-tasks                     # propose + confirm + apply renames to Plane
+uv run sprints.py --rename-tasks DATA-123            # rename single issue
+uv run sprints.py --rename-tasks DATA-123 --dry-run  # preview rename for single issue
 ```
 
 ## Environment setup

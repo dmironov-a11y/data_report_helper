@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 import requests
 
 from lib.config import PLANE_WORKSPACE_SLUG
-from lib.plane import get_cycles, get_cycle_issues, get_states, plane_patch
+from lib.plane import get_cycles, get_cycle_issues, get_states, get_issue_by_sequence_id, plane_patch
 
 VALID_TAGS = {"Chart", "Feature", "Fix", "BE", "FE", "Research", "Doc", "QA", "Infra"}
 VALID_AREAS = {
@@ -227,3 +227,64 @@ def run_rename_mode(projects: list[dict], dry_run: bool, cycle_filter: str = "ne
                 print(f"  ✗ {identifier}-{seq}: {exc}", file=sys.stderr)
 
         print(f"\nDone. {len(changed)} issues renamed.")
+
+
+def run_rename_single(projects: list[dict], ticket: str, dry_run: bool) -> None:
+    """Rename a single issue by ticket identifier like DATA-123."""
+    parts = ticket.upper().rsplit("-", 1)
+    if len(parts) != 2 or not parts[1].isdigit():
+        print(f"[ERROR] Invalid ticket format: {ticket!r}. Expected e.g. DATA-123", file=sys.stderr)
+        return
+
+    prefix, seq_str = parts
+    sequence_id = int(seq_str)
+
+    for project in projects:
+        project_id = project["id"]
+        identifier = project.get("identifier", "??")
+        if identifier.upper() != prefix:
+            continue
+
+        issue = get_issue_by_sequence_id(project_id, sequence_id)
+        if not issue:
+            print(f"[ERROR] Issue {ticket} not found in project {identifier}", file=sys.stderr)
+            return
+
+        original = issue.get("name", "")
+        print(f"\nIssue:    {identifier}-{sequence_id}")
+        print(f"Original: {original}")
+
+        if _is_good_format(original):
+            print("Already correctly formatted, nothing to rename.")
+            return
+
+        is_subtask = bool(issue.get("parent"))
+        description = issue.get("description_stripped", "") or ""
+        renamed = ai_rename(original, is_subtask=is_subtask, description=description)
+
+        print(f"Proposed: {renamed}")
+
+        if renamed == original:
+            print("No change proposed.")
+            return
+
+        if dry_run:
+            print("\n[dry-run] No changes applied.")
+            return
+
+        confirm = input("\nApply rename to Plane? [y/N] ").strip().lower()
+        if confirm != "y":
+            print("Aborted.")
+            return
+
+        try:
+            plane_patch(
+                f"/workspaces/{PLANE_WORKSPACE_SLUG}/projects/{project_id}/work-items/{issue['id']}/",
+                {"name": renamed},
+            )
+            print(f"✓ {identifier}-{sequence_id}: {renamed}")
+        except requests.HTTPError as exc:
+            print(f"✗ {identifier}-{sequence_id}: {exc}", file=sys.stderr)
+        return
+
+    print(f"[ERROR] No project found with identifier {prefix!r}", file=sys.stderr)

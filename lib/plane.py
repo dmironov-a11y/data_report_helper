@@ -141,6 +141,14 @@ def get_cycle_issues(project_id: str, cycle_id: str) -> list[dict]:
     return data.get("results", [])
 
 
+def get_issue_by_sequence_id(project_id: str, sequence_id: int) -> dict | None:
+    """Fetch a single issue by its sequence_id (e.g. 123 from DATA-123). Returns None if not found."""
+    for issue in get_all_project_issues(project_id):
+        if issue.get("sequence_id") == sequence_id:
+            return issue
+    return None
+
+
 def get_issue_identifier(project: dict, issue: dict) -> str:
     """Build e.g. DATA-123 from project identifier + issue sequence."""
     identifier = project.get("identifier", project.get("name", "??"))

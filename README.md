@@ -93,6 +93,7 @@ sprint mode
      uv run sprints.py --slack                  # send cycles to Slack
      uv run sprints.py --rename-tasks --dry-run
      uv run sprints.py --rename-tasks --dry-run --cycle current
+     uv run sprints.py --rename-tasks DATA-2240 --dry-run
 ```
 ## Output
 

@@ -9,6 +9,8 @@ Usage:
     uv run sprints.py --rename-tasks             # propose + confirm + apply renames
     uv run sprints.py --rename-tasks --cycle current
     uv run sprints.py --rename-tasks --cycle both
+    uv run sprints.py --rename-tasks DATA-123         # rename single issue
+    uv run sprints.py --rename-tasks DATA-123 --dry-run
 """
 
 import argparse
@@ -27,7 +29,7 @@ from lib.plane import (
     get_workspace_members, plane_get,
 )
 from lib.cycles import build_cycle_messages
-from lib.rename import run_rename_mode
+from lib.rename import run_rename_mode, run_rename_single
 from lib.slack import send_to_slack
 
 
@@ -57,11 +59,13 @@ def main() -> None:
     )
     parser.add_argument(
         "--rename-tasks",
-        action="store_true",
+        nargs="?",
+        const=True,
         default=False,
+        metavar="TICKET",
         help=(
-            "AI-powered rename of issues in the selected cycle. "
-            "Shows proposals and asks for confirmation before applying."
+            "AI-powered rename. Without argument: renames issues in the selected cycle. "
+            "With a ticket ID (e.g. --rename-tasks DATA-123): renames that single issue."
         ),
     )
     parser.add_argument(
@@ -95,7 +99,10 @@ def main() -> None:
 
     if args.rename_tasks:
         try:
-            run_rename_mode(projects, dry_run=args.dry_run, cycle_filter=args.cycle)
+            if isinstance(args.rename_tasks, str):
+                run_rename_single(projects, ticket=args.rename_tasks, dry_run=args.dry_run)
+            else:
+                run_rename_mode(projects, dry_run=args.dry_run, cycle_filter=args.cycle)
         except requests.HTTPError as exc:
             print(f"[ERROR] Plane API error: {exc}", file=sys.stderr)
             sys.exit(1)
