@@ -137,9 +137,6 @@ def main() -> None:
                 backlog_issues.append((identifier, title, url))
                 continue
 
-            if not updated_in_range:
-                continue
-
             if state_group == "completed":
                 completed_at = issue.get("completed_at", "")
                 completed_date = completed_at[:10] if completed_at else ""

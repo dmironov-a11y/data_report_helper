@@ -71,12 +71,11 @@ Data sources:
 #### Issue classification order (order matters)
 
 ```
-backlog/unstarted  → backlog list (shown in terminal only, regardless of updated_at)
-not updated today  → skipped
-completed          → done list
-"review" in name   → review list
+backlog/unstarted  → backlog list (shown in terminal only, no date filter)
+completed          → done list (only if completed_at on report date)
+"review" in name   → review list (only if completed_at on report date)
 blocked label      → blocked list
-started            → plane_active (merged with GitHub commits into worked_on)
+started            → plane_active (merged with GitHub commits into worked_on, no date filter)
 ```
 
 #### Commit groups (`--commits`)
