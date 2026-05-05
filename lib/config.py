@@ -24,6 +24,9 @@ GITHUB_EXTRA_REPOS = os.environ.get("GITHUB_EXTRA_REPOS", "")  # comma-separated
 SLACK_BOT_TOKEN = os.environ.get("SLACK_BOT_TOKEN", "")
 SLACK_USER_ID = os.environ.get("SLACK_USER_ID", "")
 
+NOTION_API_KEY = os.environ.get("NOTION_API_KEY", "")
+NOTION_DATABASE_ID = os.environ.get("NOTION_DATABASE_ID", "")
+
 
 def validate_config() -> bool:
     errors = []
