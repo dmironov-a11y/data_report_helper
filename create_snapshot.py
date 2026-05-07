@@ -140,8 +140,11 @@ def main():
         print("No snapshot directory found. Run notion_tasks.py first.", file=sys.stderr)
         sys.exit(1)
 
-    # Determine input files
-    tasks_file = args.tasks or os.path.join(snapshot_dir, "notion_tasks.json")
+    # Determine input files — prefer enriched tasks file if available
+    default_tasks = os.path.join(snapshot_dir, "notion_tasks_with_comments.json")
+    if not os.path.exists(default_tasks):
+        default_tasks = os.path.join(snapshot_dir, "notion_tasks.json")
+    tasks_file = args.tasks or default_tasks
     comments_file = args.comments or os.path.join(snapshot_dir, "notion_comments.json")
     output_file = os.path.join(snapshot_dir, "snapshot.json")
 
@@ -181,10 +184,14 @@ def main():
             try:
                 comments_data = json.loads(comments_content)
                 if isinstance(comments_data, dict):
-                    # Already in the right format
-                    for page_id, comments_list in comments_data.items():
-                        if isinstance(comments_list, list):
-                            comments_by_page[page_id] = comments_list
+                    if "text" in comments_data and isinstance(comments_data["text"], str):
+                        # MCP wrapper: {"text": "<xml...>"}
+                        comments_by_page = parse_xml_comments(comments_data["text"])
+                    else:
+                        # Standard {page_id: [comments]} format
+                        for page_id, comments_list in comments_data.items():
+                            if isinstance(comments_list, list):
+                                comments_by_page[page_id] = comments_list
             except json.JSONDecodeError:
                 # Try XML format
                 comments_by_page = parse_xml_comments(comments_content)
@@ -228,16 +235,14 @@ def main():
             except:
                 pass
 
-        # Get comments for this page
-        recent_comments = []
-        if page_uuid in comments_by_page:
-            # Sort by datetime descending (newest first)
-            page_comments = sorted(
+        # Get comments — prefer inline field set by notion_comments.py, fall back to external file
+        recent_comments = row.get("recent_comments") or []
+        if not recent_comments and page_uuid in comments_by_page:
+            recent_comments = sorted(
                 comments_by_page[page_uuid],
                 key=lambda c: c.get("datetime", ""),
                 reverse=True
             )
-            recent_comments = page_comments
 
         task = {
             "id": user_id,
@@ -257,25 +262,25 @@ def main():
         }
         tasks.append(task)
 
-    # Build sprint info (from first task or generic)
+    # Build sprint info — prefer notion_sprints.json if available
     sprint = {
         "name": "Unknown Sprint",
         "start": snapshot_date.isoformat(),
         "end": None
     }
 
-    # Check if any task has sprint info
-    for row in results:
-        sprint_str = row.get("Sprint")
-        if sprint_str and sprint_str != "None":
-            try:
-                sprint_urls = json.loads(sprint_str)
-                if sprint_urls and isinstance(sprint_urls, list):
-                    # Extract sprint name from URL or use generic
-                    sprint["name"] = f"Sprint {snapshot_date.strftime('%Y-W%U')}"
-                    break
-            except:
-                pass
+    sprints_file = os.path.join(snapshot_dir, "notion_sprints.json")
+    if os.path.exists(sprints_file):
+        try:
+            with open(sprints_file) as f:
+                sprints_data = json.load(f)
+            current = sprints_data.get("current", {})
+            if current:
+                sprint["name"] = current.get("sprint_name") or sprint["name"]
+                sprint["start"] = current.get("start") or sprint["start"]
+                sprint["end"] = current.get("end")
+        except Exception as e:
+            print(f"Warning: could not load sprints from {sprints_file}: {e}", file=sys.stderr)
 
     # Build snapshot with metadata
     snapshot = {

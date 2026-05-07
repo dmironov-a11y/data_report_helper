@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fetch all Notion tasks via Claude + MCP, save raw output.
+"""Fetch Notion tasks via Claude + MCP, save raw output.
 
 Two modes:
   --sql (default):   Use notion-query-data-sources MCP tool with explicit SQL
@@ -10,6 +10,10 @@ Usage:
     uv run notion_tasks.py --prompt                          # Prompt mode
     uv run notion_tasks.py --dir snapshots/2026-05-07_demo   # save to specific snapshot dir
     uv run notion_tasks.py --model sonnet                    # use Sonnet instead of Haiku
+    uv run notion_tasks.py --sprint current                  # filter by current sprint (default)
+    uv run notion_tasks.py --sprint all                      # fetch all tasks (no sprint filter)
+
+Sprint filtering requires notion_sprints.json in the snapshot dir (run notion_sprints.py first).
 """
 import argparse
 import json
@@ -49,13 +53,42 @@ def extract_file_if_saved(text: str) -> str:
     return text
 
 
-def sql_mode(model: str) -> str:
+def extract_json(text: str) -> str:
+    """Strip Claude preamble and code fences, return raw JSON string."""
+    m = re.search(r'```(?:json)?\n(.*?)\n```', text, re.DOTALL)
+    if m:
+        return m.group(1).strip()
+    for char in ('{', '['):
+        idx = text.find(char)
+        if idx != -1:
+            return text[idx:].strip()
+    return text.strip()
+
+
+def load_sprint_url(snapshot_dir: str, sprint_key: str) -> str | None:
+    """Read sprint URL from notion_sprints.json in the snapshot dir."""
+    if not snapshot_dir:
+        return None
+    sprints_path = os.path.join(snapshot_dir, "notion_sprints.json")
+    if not os.path.exists(sprints_path):
+        return None
+    with open(sprints_path) as f:
+        sprints = json.load(f)
+    sprint = sprints.get(sprint_key)
+    return sprint.get("url") if sprint else None
+
+
+def sql_mode(model: str, sprint_url: str | None = None) -> str:
     """Use notion-query-data-sources MCP tool with explicit SQL query."""
+    if sprint_url:
+        query = f'SELECT * FROM "{TASKS_DB}" WHERE "Sprint" LIKE \'%{sprint_url}%\''
+    else:
+        query = f'SELECT * FROM "{TASKS_DB}"'
     prompt = (
         'Use the notion-query-data-sources MCP tool with these exact parameters:\n'
         f'- mode: "sql"\n'
         f'- data_source_urls: ["{TASKS_DB}"]\n'
-        f'- query: SELECT * FROM "{TASKS_DB}"\n\n'
+        f'- query: {query}\n\n'
         'Return the COMPLETE raw output from the MCP tool with ALL fields and data unchanged.\n'
         'Do not filter, summarize, or modify the response.'
     )
@@ -81,6 +114,8 @@ def main():
     ap.add_argument("--out", default=None, help="output file (overrides --dir)")
     ap.add_argument("--model", default="haiku", choices=["haiku", "sonnet", "opus"],
                     help="Claude model (default: haiku)")
+    ap.add_argument("--sprint", default="current", choices=["current", "next", "last", "all"],
+                    help="sprint filter: current (default), next, last, or all (no filter)")
 
     mode_group = ap.add_mutually_exclusive_group()
     mode_group.add_argument("--sql", action="store_true", dest="sql_mode", default=True,
@@ -103,13 +138,27 @@ def main():
     if out_dir and not os.path.exists(out_dir):
         os.makedirs(out_dir)
 
+    # Resolve sprint filter
+    sprint_url = None
+    snapshot_dir = args.dir or out_dir
+    if args.sprint != "all":
+        sprint_url = load_sprint_url(snapshot_dir, args.sprint)
+        if sprint_url:
+            sprint_name = args.sprint
+            print(f"Sprint filter: {sprint_name} ({sprint_url})", file=sys.stderr)
+        else:
+            print(f"No notion_sprints.json found in {snapshot_dir}, fetching all tasks", file=sys.stderr)
+
     # Fetch data based on mode
     if args.prompt_mode:
         text = prompt_mode(args.model)
         mode_label = "prompt"
     else:  # SQL mode (default)
-        text = sql_mode(args.model)
+        text = sql_mode(args.model, sprint_url=sprint_url)
         mode_label = "sql"
+
+    # Strip preamble/code fences so the file is clean JSON
+    text = extract_json(text)
 
     # Save raw output
     with open(out_path, "w") as f:

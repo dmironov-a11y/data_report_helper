@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-"""Fetch Notion task comments via Claude + MCP, save raw output.
+"""Fetch Notion comments per task via Claude + MCP, enrich notion_tasks.json in place.
+
+Calls Claude CLI once per task (parallel workers), parses XML comments,
+and adds `recent_comments` field to each task in notion_tasks.json.
 
 Usage:
-    uv run notion_comments.py page_id1 page_id2                           # → snapshots/YYYY-MM-DD_HHMMSS/
-    uv run notion_comments.py --dir snapshots/2026-05-07_demo page_id1    # save to specific snapshot dir
-    uv run notion_comments.py --model sonnet page_id1                      # use Sonnet instead of Haiku
-    uv run notion_comments.py --include-all-blocks page_id1                # include child block comments
-    uv run notion_comments.py --include-resolved page_id1                  # include resolved discussions
+    uv run notion_comments.py --dir snapshots/2026-05-07_demo
+    uv run notion_comments.py --dir snapshots/... --model sonnet
+    uv run notion_comments.py --dir snapshots/... --workers 10
+    uv run notion_comments.py --dir snapshots/... --include-resolved
 """
 import argparse
 import json
@@ -14,101 +16,124 @@ import os
 import re
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
 
 def run_claude(prompt: str, model: str) -> str:
-    """Run Claude with --print and return stdout."""
     cmd = ["claude", "--print", "--model", model, prompt]
-    result = subprocess.run(
-        cmd,
-        capture_output=True, text=True, timeout=180,
-    )
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
     if result.returncode != 0:
-        print(f"Claude error:\n{result.stderr}", file=sys.stderr)
-        sys.exit(1)
+        raise RuntimeError(result.stderr.strip())
     return result.stdout.strip()
 
 
-def extract_file_if_saved(text: str) -> str:
-    """If Claude saved output to file, read and return it."""
-    m = re.search(r'(/Users/.+?/tool-results/.+?\.txt)', text)
+def extract_xml(text: str) -> str:
+    """Extract XML from Claude output — strips JSON wrapper or code fences."""
+    # {"text": "<xml...>"} wrapper
+    try:
+        data = json.loads(text)
+        if isinstance(data, dict) and "text" in data:
+            return data["text"]
+    except (json.JSONDecodeError, ValueError):
+        pass
+    # ```xml or ```json fence
+    m = re.search(r'```(?:xml|json)?\n(.*?)\n```', text, re.DOTALL)
     if m:
-        file_path = m.group(1)
-        try:
-            with open(file_path, "r") as f:
-                return f.read().strip()
-        except FileNotFoundError:
-            print(f"Could not read file: {file_path}", file=sys.stderr)
-            sys.exit(1)
-    return text
+        return m.group(1).strip()
+    # raw XML
+    idx = text.find('<')
+    if idx != -1:
+        return text[idx:].strip()
+    return text.strip()
 
 
-def fetch_comments(page_ids: list, model: str, include_all_blocks: bool, include_resolved: bool) -> str:
-    """Use notion-get-comments MCP tool to fetch comments."""
-    page_ids_list = "\n".join(page_ids)
+def parse_comments(xml: str) -> list[dict]:
+    """Parse <comment datetime="...">text</comment> tags from XML."""
+    comments = []
+    for m in re.finditer(r'<comment[^>]*datetime="([^"]*)"[^>]*>(.*?)</comment>', xml, re.DOTALL):
+        text = m.group(2).strip()
+        if text:
+            comments.append({"text": text, "datetime": m.group(1)})
+    # Sort newest first
+    comments.sort(key=lambda c: c.get("datetime", ""), reverse=True)
+    return comments
+
+
+def fetch_comments_for_task(url: str, model: str, include_resolved: bool) -> list[dict]:
     prompt = (
-        'Use the notion-get-comments MCP tool to fetch comments for each of these page IDs.\n'
-        'Fetch in parallel.\n\n'
-        f'Page IDs:\n{page_ids_list}\n\n'
-        f'Options: include_all_blocks={str(include_all_blocks).lower()}, include_resolved={str(include_resolved).lower()}\n\n'
-        'Return the COMPLETE raw output from the MCP tool with ALL comment data and fields unchanged.\n'
-        'Do not filter, summarize, or modify the response.'
+        f'Use the notion-get-comments MCP tool with these parameters:\n'
+        f'- page_id: "{url}"\n'
+        f'- include_all_blocks: true\n'
+        f'- include_resolved: {str(include_resolved).lower()}\n\n'
+        'Return the COMPLETE raw output from the MCP tool unchanged.'
     )
-    text = run_claude(prompt, model)
-    return extract_file_if_saved(text)
+    try:
+        text = run_claude(prompt, model)
+        xml = extract_xml(text)
+        return parse_comments(xml)
+    except Exception as e:
+        print(f"  warn: {url} — {e}", file=sys.stderr)
+        return []
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("page_ids", nargs="+", help="page IDs to fetch comments for (required)")
-    ap.add_argument("--dir", default=None, help="snapshot directory (default: snapshots/YYYY-MM-DD_HHMMSS)")
-    ap.add_argument("--out", default=None, help="output file (overrides --dir)")
-    ap.add_argument("--model", default="haiku", choices=["haiku", "sonnet", "opus"],
-                    help="Claude model (default: haiku)")
-    ap.add_argument("--include-all-blocks", action="store_true",
-                    help="include discussions on child blocks (default: page-level only)")
-    ap.add_argument("--include-resolved", action="store_true",
-                    help="include resolved discussions (default: unresolved only)")
-
+    ap.add_argument("--dir", required=True, help="snapshot directory containing notion_tasks.json")
+    ap.add_argument("--model", default="haiku", choices=["haiku", "sonnet", "opus"])
+    ap.add_argument("--workers", type=int, default=5, help="parallel workers (default: 5)")
+    ap.add_argument("--include-resolved", action="store_true", help="include resolved discussions")
     args = ap.parse_args()
 
-    # Prepare output path
-    if args.out:
-        out_path = args.out
-    elif args.dir:
-        out_path = os.path.join(args.dir, "notion_comments.json")
+    tasks_path = os.path.join(args.dir, "notion_tasks.json")
+    if not os.path.exists(tasks_path):
+        print(f"Not found: {tasks_path}", file=sys.stderr)
+        sys.exit(1)
+
+    with open(tasks_path) as f:
+        data = json.load(f)
+    rows = data.get("results", data) if isinstance(data, dict) else data
+
+    urls = [(i, r["url"]) for i, r in enumerate(rows) if r.get("url")]
+    print(f"Fetching comments for {len(urls)} tasks (workers={args.workers})...", file=sys.stderr)
+
+    results = {}
+
+    def fetch(i_url):
+        i, url = i_url
+        comments = fetch_comments_for_task(url, args.model, args.include_resolved)
+        return i, comments
+
+    with ThreadPoolExecutor(max_workers=args.workers) as pool:
+        futures = {pool.submit(fetch, iu): iu for iu in urls}
+        done = 0
+        for future in as_completed(futures):
+            i, comments = future.result()
+            results[i] = comments
+            done += 1
+            if comments:
+                print(f"  [{done}/{len(urls)}] #{i} — {len(comments)} comment(s)", file=sys.stderr)
+            else:
+                print(f"  [{done}/{len(urls)}] #{i} — no comments", file=sys.stderr)
+
+    # Attach comments to each task row
+    total = 0
+    for i, row in enumerate(rows):
+        row["recent_comments"] = results.get(i, [])
+        total += len(row["recent_comments"])
+
+    # Save to notion_tasks_with_comments.json (notion_tasks.json unchanged)
+    if isinstance(data, dict) and "results" in data:
+        data["results"] = rows
+        out = data
     else:
-        timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
-        out_path = f"snapshots/{timestamp}/notion_comments.json"
+        out = rows
 
-    # Create output dir
-    out_dir = os.path.dirname(out_path)
-    if out_dir and not os.path.exists(out_dir):
-        os.makedirs(out_dir)
-
-    print(f"Fetching comments for {len(args.page_ids)} task(s)...", file=sys.stderr)
-
-    # Fetch comments
-    text = fetch_comments(args.page_ids, args.model, args.include_all_blocks, args.include_resolved)
-
-    # Save raw output
+    out_path = os.path.join(args.dir, "notion_tasks_with_comments.json")
     with open(out_path, "w") as f:
-        f.write(text)
+        json.dump(out, f, indent=2, ensure_ascii=False)
 
-    # Count comment objects (works for both JSON and XML formats)
-    count = 0
-    try:
-        data = json.loads(text)
-        if isinstance(data, dict):
-            for page_id, comments in data.items():
-                if isinstance(comments, list):
-                    count += len(comments)
-    except:
-        # Try XML format
-        count = text.count('<comment')
-
-    print(f"✓ {count} comments → {out_path}", file=sys.stderr)
+    print(f"✓ {total} total comments → {out_path}", file=sys.stderr)
 
 
 if __name__ == "__main__":
