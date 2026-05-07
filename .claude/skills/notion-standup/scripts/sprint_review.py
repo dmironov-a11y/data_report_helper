@@ -44,10 +44,18 @@ def main() -> None:
 
     prev_by_id = {t["id"]: t for t in prev.get("tasks", [])}
     today_ids = {t["id"] for t in today.get("tasks", [])}
+    today_by_id = {t["id"]: t for t in today.get("tasks", [])}
 
-    shipped = [t for t in prev.get("tasks", []) if t["group"] == "done"]
-    carried_over = [t for t in prev.get("tasks", []) if t["group"] != "done" and t["id"] in today_ids]
-    newly_added = [t for t in today.get("tasks", []) if t["id"] not in prev_by_id]
+    def is_top_level(t, snapshot_by_id):
+        pid = t.get("parent_id")
+        return pid is None or pid not in snapshot_by_id
+
+    prev_top_level = {t["id"] for t in prev.get("tasks", []) if is_top_level(t, prev_by_id)}
+    today_top_level = {t["id"] for t in today.get("tasks", []) if is_top_level(t, today_by_id)}
+
+    shipped = [t for t in prev.get("tasks", []) if t["group"] == "done" and t["id"] in prev_top_level]
+    carried_over = [t for t in prev.get("tasks", []) if t["group"] != "done" and t["id"] in today_ids and t["id"] in prev_top_level]
+    newly_added = [t for t in today.get("tasks", []) if t["id"] not in prev_by_id and t["id"] in today_top_level]
 
     if not shipped and not carried_over and not newly_added:
         return
