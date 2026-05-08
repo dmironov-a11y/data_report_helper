@@ -66,7 +66,10 @@ def fetch_comments_for_task(url: str, model: str, include_resolved: bool) -> lis
         f'- page_id: "{url}"\n'
         f'- include_all_blocks: true\n'
         f'- include_resolved: {str(include_resolved).lower()}\n\n'
-        'Return the COMPLETE raw output from the MCP tool unchanged.'
+        'Output ONLY the raw XML response from the MCP tool, nothing else.\n'
+        'No preamble, no explanation, no code fences, no markdown.\n'
+        'Every character must come from the MCP tool output.\n'
+        'Do not truncate, abbreviate, or modify any data.'
     )
     try:
         text = run_claude(prompt, model)

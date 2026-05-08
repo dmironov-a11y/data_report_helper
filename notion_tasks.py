@@ -89,8 +89,10 @@ def sql_mode(model: str, sprint_url: str | None = None) -> str:
         f'- mode: "sql"\n'
         f'- data_source_urls: ["{TASKS_DB}"]\n'
         f'- query: {query}\n\n'
-        'Return the COMPLETE raw output from the MCP tool with ALL fields and data unchanged.\n'
-        'Do not filter, summarize, or modify the response.'
+        'Output ONLY the raw JSON response from the MCP tool, nothing else.\n'
+        'No preamble, no explanation, no code fences, no markdown.\n'
+        'Every character must come from the MCP tool output.\n'
+        'Do not truncate, abbreviate, or modify any data.'
     )
     text = run_claude(prompt, model)
     return extract_file_if_saved(text)
@@ -101,8 +103,10 @@ def prompt_mode(model: str) -> str:
     prompt = (
         'Use the notion-query-data-sources MCP tool to query all tasks:\n'
         f'SELECT * FROM "{TASKS_DB}"\n\n'
-        'Return the COMPLETE raw output from the MCP tool with ALL fields and data unchanged.\n'
-        'Do not filter, summarize, or modify the response.'
+        'Output ONLY the raw JSON response from the MCP tool, nothing else.\n'
+        'No preamble, no explanation, no code fences, no markdown.\n'
+        'Every character must come from the MCP tool output.\n'
+        'Do not truncate, abbreviate, or modify any data.'
     )
     text = run_claude(prompt, model)
     return extract_file_if_saved(text)
