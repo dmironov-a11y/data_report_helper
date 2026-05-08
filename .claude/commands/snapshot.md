@@ -35,14 +35,19 @@ uv run notion_comments.py --dir "$DIR"
 
 Calls Claude CLI once per task (5 parallel workers). Fetches comments via `notion-get-comments` MCP and saves `$DIR/notion_tasks_with_comments.json` — full task array with `recent_comments` added to each task. `notion_tasks.json` stays unchanged.
 
-## Step 5 — Build snapshot.json
+## Step 5 — Build AI snapshot
 
 ```bash
-uv run create_snapshot.py --dir "$DIR"
+uv run synthesize_snapshot.py --dir "$DIR"
 ```
 
-Reads enriched `notion_tasks.json` and sprint info from `notion_sprints.json`, produces `$DIR/snapshot.json`.
+Builds skeleton **only over parent-level tasks** (subtasks fold into `parent.subtasks` metadata: `{total, done, in_progress, blocked, not_started, percent}` with progress = `(done + max(in_progress - blocked, 0) / 2) / total`). Classifies each task as `active`/`stale`/`dormant` scriptably (no AI), then calls Claude CLI once per parent in 5 parallel workers (`haiku` model). Pre-filters comments to last 4 days and passes prior snapshot's summary + open actions + subtask names/states so Claude can focus on what's NEW vs yesterday and reflect subtask progress. Returns per task: `status_summary`, `action_items`, `blocker`, `release_status` (`none|ready_to_release|sent_to_release|released` — releases are owned by another team, we hand off and wait). Auto-finds the latest older snapshot in `snapshots/` as the prior. Produces `$DIR/snapshot.json` — the canonical input for standup rendering.
 
-## Done
+## Step 6 — Render standup (separate command)
 
-Print path to `$DIR/snapshot.json`, task count, and total comment count.
+```bash
+uv run render_standup.py --dir "$DIR"          # writes standup_main.txt + standup_thread.txt
+uv run render_standup.py --dir "$DIR" --slack  # also posts to Slack DM (1 short main + thread details)
+```
+
+Main: 🎯 Фокус дня → 🔄 В работе → ⛔ Заблокированы / ожидают → 📦 Готово к релизу / 📤 Отдано в релиз / 🚀 Зарелижено. Sprint progress в хедере (по той же формуле, по парент-задачам). Subtask-прогресс инлайном у каждой parent-задачи. Thread: ✅ Закрыто сегодня → ⚠️ Висит без апдейтов → 📥 Не запущено / на ревизию → 🗄 Закрыто ранее.

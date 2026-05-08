@@ -4,3 +4,9 @@
 .claude/settings.local.json
 __pycache__/
 *.pyc
+
+# Generated / fetched data — not committed
+snapshots/
+cache/
+standups/
+tests/
