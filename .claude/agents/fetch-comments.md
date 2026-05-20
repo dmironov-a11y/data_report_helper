@@ -25,8 +25,8 @@ Read `{dir}/notion_tasks.json`. This is a JSON array of task rows. Keep the full
 
 **Step 2 — Fetch comments per task**
 
-For each task row that has a non-empty `url` field, call `mcp__claude_ai_Notion__notion-get-comments` with:
-- page_id: the task's `url` value
+For each task row that has a non-empty `id` field, call `mcp__claude_ai_Notion__notion-get-comments` with:
+- page_id: the task's `id` value (UUID format e.g. `34550979-0d9a-8193-9431-ef996782fa3a`) — NOT the `url`
 - include_all_blocks: true
 - include_resolved: false
 

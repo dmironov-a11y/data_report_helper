@@ -6,6 +6,10 @@ allowed-tools: ["Bash", "Read", "Write", "mcp__claude_ai_Notion__notion-query-da
 
 Build a full Notion sprint snapshot. All Notion data fetching happens in the current session via MCP tools directly — no subprocess spawning, no agents.
 
+> **Detailed rules** for each step live in:
+> `.claude/plugins/notion-snapshot/skills/snapshot/rules/`
+> Read the relevant file if you need the exact field mappings, output format, or parsing logic for a given step.
+
 ## Step 1 — Create snapshot directory
 
 ```bash
@@ -16,6 +20,8 @@ mkdir -p "$DIR"
 Remember `$DIR` for all subsequent steps.
 
 ## Step 2 — Fetch sprint IDs
+
+> Detailed rules: `.claude/plugins/notion-snapshot/skills/snapshot/rules/fetch-sprints.md`
 
 Call the Notion MCP query tool with:
 - mode: `"sql"`
@@ -40,7 +46,9 @@ Write to `$DIR/notion_sprints.json`.
 
 ## Step 3 — Fetch current-sprint tasks
 
-Read `$DIR/notion_sprints.json`, extract `current.url`.
+> Detailed rules: `.claude/plugins/notion-snapshot/skills/snapshot/rules/fetch-tasks.md`
+
+Read `$DIR/notion_sprints.json`, extract `current.url` (the Notion URL of the current sprint).
 
 Call the Notion MCP query tool with:
 - mode: `"sql"`
@@ -50,16 +58,19 @@ Call the Notion MCP query tool with:
   SELECT * FROM "collection://35650979-0d9a-80f6-92ed-000b93238f83"
   WHERE "Sprint" LIKE '%{SPRINT_URL}%'
   ```
+  Replace `{SPRINT_URL}` with the actual `current.url` value.
 
 Write the raw JSON array to `$DIR/notion_tasks.json`. Strip any code fences or wrapper objects — the file must contain only a valid JSON array.
 
 ## Step 4 — Fetch PR data
 
-Read `$DIR/notion_tasks.json`. For each task, parse the `GitHub Pull Requests` field (JSON-encoded list). Collect all unique PR page URLs.
+> Detailed rules: `.claude/plugins/notion-snapshot/skills/snapshot/rules/fetch-prs.md`
 
-If no PR URLs found: write `{}` to `$DIR/notion_prs.json` and skip.
+Read `$DIR/notion_tasks.json`. For each task, parse the `GitHub Pull Requests` field (JSON-encoded list of Notion page URLs). Build a mapping `{task_url: [pr_page_url, ...]}`.
 
-Otherwise, call the Notion MCP query tool with:
+If no tasks have PR URLs: write `{}` to `$DIR/notion_prs.json` and skip.
+
+Otherwise, collect all unique PR page URLs and call the Notion MCP query tool with:
 - mode: `"sql"`
 - data_source_urls: `["collection://36650979-0d9a-805f-80b4-000ba2669c0d"]`
 - query:
@@ -70,23 +81,39 @@ Otherwise, call the Notion MCP query tool with:
   WHERE url IN ('url1', 'url2', ...)
   ```
 
-Build the index — dict keyed by task URL:
+Build the PR index — a dict keyed by **task Notion URL**, each value a list of PR objects sorted by `number`:
+```json
+{
+  "https://www.notion.so/<task-uuid>": [
+    { "number": 154, "merged": true, "title": "[STAGE] Fix auth", "env": "STAGE", "url": "..." }
+  ]
+}
+```
+- `number`: integer `PR Number`
 - `merged`: true if `date:Merged At:start` or `date:Closed At:start` is non-null
+- `title`: the `Title` field value
 - `env`: first `[TAG]` from title via `^\[([^\]]+)\]`, else `""`
-- Sort each task's list by `number`
+- `url`: the PR page `url`
 
 Write to `$DIR/notion_prs.json`.
 
 ## Step 5 — Enrich tasks with comments
 
+> Detailed rules: `.claude/plugins/notion-snapshot/skills/snapshot/rules/fetch-comments.md`
+
 Read all tasks from `$DIR/notion_tasks.json`.
 
-For each task with a non-empty `url`, call the Notion MCP get-comments tool with:
-- page_id: the task url
+For each task with a non-empty `id`, call the Notion MCP get-comments tool with:
+- page_id: the task `id` field (UUID e.g. `34550979-0d9a-8193-9431-ef996782fa3a`) — NOT the full `url`
 - include_all_blocks: true
 - include_resolved: false
 
-Parse `<comment datetime="...">TEXT</comment>` from the XML response. Strip HTML tags; skip empty. Add `recent_comments: [{text, datetime}]` (newest-first) to each task row.
+Parse `<comment datetime="...">TEXT</comment>` from the XML response. Strip HTML tags:
+- `<mention-user url="..."/>` → `@user`
+- `<br/>` or `<br>` → newline
+- all other tags → removed
+
+Skip comments with empty text after stripping. Build `recent_comments: [{text, datetime}]` sorted newest-first. Set `[]` for tasks with no comments or errors.
 
 Write the enriched array to `$DIR/notion_tasks_with_comments.json`.
 

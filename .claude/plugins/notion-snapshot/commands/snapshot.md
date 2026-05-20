@@ -1,5 +1,5 @@
 ---
-description: Build a full Notion sprint snapshot via MCP sub-agents — fetches sprints, tasks, PRs, and comments directly via Notion MCP (no subprocess Claude CLI), then runs AI synthesis. Produces snapshots/YYYY-MM-DD_HHMMSS/snapshot.json.
+description: Build a full Notion sprint snapshot via MCP sub-rules — fetches sprints, tasks, PRs, and comments directly via Notion MCP (no subprocess Claude CLI), then runs AI synthesis. Produces snapshots/YYYY-MM-DD_HHMMSS/snapshot.json.
 argument-hint: "[standup|review] [en]"
 allowed-tools: ["Bash", "Read", "Write"]
 ---
