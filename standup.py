@@ -13,7 +13,6 @@ import glob
 import json
 import os
 import re
-import subprocess
 import sys
 from datetime import date
 
@@ -256,10 +255,6 @@ def main() -> None:
     )
     print()
     print(report)
-
-    body = "\n".join(report.splitlines()[2:])
-    subprocess.run("pbcopy", input=body.encode(), check=False)
-    print("✓ Copied to clipboard", file=sys.stderr)
 
     if args.slack:
         if not SLACK_BOT_TOKEN:

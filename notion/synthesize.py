@@ -386,7 +386,7 @@ def render_subtasks_block(sub: dict | None) -> str:
 
 
 def build_prompt(task: dict, recent_window: list[dict], prior: dict | None,
-                 window_days: int, lang: str = "ru") -> str:
+                 window_days: int, lang: str = "en") -> str:
     name = task["name"]
     state = task["state"] or "(no state)"
     if prior and prior.get("status_summary"):
@@ -457,7 +457,7 @@ def build_prompt(task: dict, recent_window: list[dict], prior: dict | None,
 
 
 def synthesize_one(task: dict, recent_window: list[dict], prior: dict | None,
-                   model: str, window_days: int, lang: str = "ru") -> dict:
+                   model: str, window_days: int, lang: str = "en") -> dict:
     prompt = build_prompt(task, recent_window, prior, window_days, lang)
     try:
         text = run_claude(prompt, model)
@@ -528,8 +528,8 @@ def main() -> None:
     ap.add_argument("--comment-window-days", type=int, default=4)
     ap.add_argument("--stale-days", type=int, default=2)
     ap.add_argument("--model", default="haiku", choices=["haiku", "sonnet", "opus"])
-    ap.add_argument("--lang", default="ru", choices=["ru", "en"],
-                    help="Language for AI summaries: ru (default) or en")
+    ap.add_argument("--lang", default="en", choices=["ru", "en"],
+                    help="Language for AI summaries: en (default) or ru")
     args = ap.parse_args()
 
     snap_dir = args.dir

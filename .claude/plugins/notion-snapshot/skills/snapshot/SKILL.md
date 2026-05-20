@@ -1,6 +1,6 @@
 ---
 description: This skill should be used when the user invokes "/notion-snapshot:snapshot", asks to "build a sprint snapshot", "fetch notion tasks", "run the snapshot pipeline", or "update snapshot". Runs the full Notion sprint snapshot pipeline using MCP directly in-session — fetches sprints, tasks, PRs, and comments via Notion MCP, then runs AI synthesis.
-argument-hint: "[standup|review] [en]"
+argument-hint: "[standup|review] [ru]"
 allowed-tools: ["Bash", "Read", "Write", "mcp__claude_ai_Notion__notion-query-data-sources", "mcp__claude_ai_Notion__notion-get-comments"]
 ---
 
@@ -92,10 +92,10 @@ Write the enriched array to `$DIR/notion_tasks_with_comments.json`.
 ## Step 6 — Build AI snapshot
 
 ```bash
-# argument contains "en":
-uv run notion/synthesize.py --dir "$DIR" --lang en
+# argument contains "ru":
+uv run notion/synthesize.py --dir "$DIR" --lang ru
 
-# otherwise:
+# otherwise (default is English):
 uv run notion/synthesize.py --dir "$DIR"
 ```
 
@@ -112,6 +112,14 @@ Produces `$DIR/snapshot.json`.
   uv run notion/sprint_review.py --dir "$DIR" --slack
   ```
 - **No argument**: print `Snapshot ready: $DIR/snapshot.json`
+
+## Step 8 — Cleanup old snapshots
+
+```bash
+uv run scripts/cleanup_snapshots.py
+```
+
+Deletes snapshot directories older than 10 days (names matching `YYYY-MM-DD_HHMMSS`). Run unconditionally after render.
 
 ## Error handling
 
