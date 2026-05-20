@@ -23,7 +23,7 @@ from datetime import datetime
 def run_claude(prompt: str, model: str) -> str:
     cmd = [
         "claude", "--print", "--model", model,
-        "--allowedTools", "mcp__claude_ai_Notion__notion-get-comments",
+        "--allowedTools", "mcp__claude_ai_Notion__notion-get-comments,Read",
     ]
     result = subprocess.run(cmd, input=prompt, capture_output=True, text=True, timeout=120)
     if result.returncode != 0:

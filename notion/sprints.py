@@ -20,7 +20,7 @@ SPRINTS_DB = "collection://35750979-0d9a-80a1-8b0f-000bf8fd37f8"
 def run_claude(prompt: str, model: str) -> str:
     cmd = [
         "claude", "--print", "--model", model,
-        "--allowedTools", "mcp__claude_ai_Notion__notion-query-data-sources",
+        "--allowedTools", "mcp__claude_ai_Notion__notion-query-data-sources,Read",
     ]
     result = subprocess.run(cmd, input=prompt, capture_output=True, text=True, timeout=120)
     if result.returncode != 0:

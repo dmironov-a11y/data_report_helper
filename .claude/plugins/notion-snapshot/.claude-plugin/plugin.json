@@ -1,0 +1,8 @@
+{
+  "name": "notion-snapshot",
+  "version": "0.1.0",
+  "description": "Notion sprint snapshot pipeline — fetches sprints, tasks, PRs, comments via MCP sub-agents and builds snapshot.json for standups",
+  "author": {
+    "name": "denmironov"
+  }
+}

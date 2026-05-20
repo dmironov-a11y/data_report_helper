@@ -30,7 +30,7 @@ def run_claude(prompt: str, model: str) -> str:
     """Run Claude with --print and return stdout."""
     cmd = [
         "claude", "--print", "--model", model,
-        "--allowedTools", "mcp__claude_ai_Notion__notion-query-data-sources",
+        "--allowedTools", "mcp__claude_ai_Notion__notion-query-data-sources,Read",
     ]
     result = subprocess.run(
         cmd,

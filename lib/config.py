@@ -16,6 +16,8 @@ SLACK_USER_ID = os.environ.get("SLACK_USER_ID", "")
 
 NOTION_USER_ID = os.environ.get("NOTION_USER_ID", "")  # e.g. user://UUID
 
+GITHUB_PR_REPO = os.environ.get("GITHUB_PR_REPO", "")  # e.g. Paynext-com/paynext-tinybird
+
 
 def parse_date_arg(value: str) -> date:
     try:

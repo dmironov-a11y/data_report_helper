@@ -31,7 +31,7 @@ _ENV_TAG_RE = re.compile(r'^\[([^\]]+)\]')
 def run_claude(prompt: str, model: str) -> str:
     cmd = [
         "claude", "--print", "--model", model,
-        "--allowedTools", "mcp__claude_ai_Notion__notion-query-data-sources",
+        "--allowedTools", "mcp__claude_ai_Notion__notion-query-data-sources,Read",
     ]
     result = subprocess.run(cmd, input=prompt, capture_output=True, text=True, timeout=120)
     if result.returncode != 0:

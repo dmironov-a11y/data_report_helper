@@ -1,6 +1,7 @@
 from collections import OrderedDict
 from datetime import date, timedelta
 
+from lib.config import GITHUB_PR_REPO
 from lib.github import COMMIT_RE, TICKET_RE
 
 # ---------------------------------------------------------------------------
@@ -15,6 +16,13 @@ SEC_BLOCKED = ":no_entry: Blocked:"
 SEC_NEED_TASKS = ":jigsaw: Need tasks (Optional):"
 SEC_BACKLOG = ":card_index: Backlog (assigned, not started):"
 SEC_UNKNOWN_TICKETS = ":spiral_note_pad: Commits linked to unknown ticket:"
+
+
+def _pr_url(p: dict) -> str:
+    """Return GitHub PR URL if GITHUB_PR_REPO is set, else fall back to Notion page URL."""
+    if GITHUB_PR_REPO and p.get("number"):
+        return f"https://github.com/{GITHUB_PR_REPO}/pull/{p['number']}"
+    return p.get("url", "")
 
 
 # ---------------------------------------------------------------------------
@@ -147,9 +155,11 @@ def build_slack_report(
             state_suffix = f" _({info['state']})_" if info.get("state") else ""
             prs = info.get("prs", [])
             pr_suffix = "".join(
-                f" · <{p['url']}|PR #{p['number']}{' [' + p['env'] + ']' if p.get('env') else ''}>{'  ✓' if p.get('merged') else ''}"
-                if p.get("url") else
-                f" · PR #{p['number']}{' [' + p['env'] + ']' if p.get('env') else ''}{'  ✓' if p.get('merged') else ''}"
+                (lambda u, n, env, merged:
+                    f" · <{u}|PR #{n}{' [' + env + ']' if env else ''}>{'  ✓' if merged else ''}"
+                    if u else
+                    f" · PR #{n}{' [' + env + ']' if env else ''}{'  ✓' if merged else ''}"
+                )(_pr_url(p), p['number'], p.get('env', ''), p.get('merged', False))
                 for p in prs if p.get("number")
             )
             lines.append(issue_line(ticket, info.get("title", ""), info.get("url", ""), suffix=state_suffix + pr_suffix))
@@ -230,7 +240,7 @@ def build_report(
             prs = info.get("prs", [])
             pr_suffix = "".join(
                 (f" · PR #{p['number']}{' [' + p['env'] + ']' if p.get('env') else ''}{'  ✓' if p.get('merged') else ''}"
-                 + (f" {p['url']}" if add_links and p.get("url") else ""))
+                 + (f" {_pr_url(p)}" if add_links and (GITHUB_PR_REPO or p.get("url")) else ""))
                 for p in prs if p.get("number")
             )
             lines.append(issue_line(ticket, info.get("title", ""), info.get("url", ""), suffix=state_suffix + pr_suffix))

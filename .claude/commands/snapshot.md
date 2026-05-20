@@ -1,70 +1,89 @@
 ---
-description: Build a full Notion snapshot for the current sprint — runs notion_sprints → notion_tasks → notion_comments (one Claude call per task) → create_snapshot and produces snapshots/YYYY-MM-DD_HHMMSS/snapshot.json. Use /snapshot any time you need a fresh snapshot of current sprint tasks with all comments.
+description: Build a full Notion sprint snapshot via MCP sub-agents — fetches sprints, tasks, PRs, and comments directly in-session via Notion MCP (no subprocess Claude CLI), then runs AI synthesis. Use /snapshot any time a fresh snapshot of current sprint tasks is needed.
+argument-hint: "[standup|review] [en]"
+allowed-tools: ["Bash", "Read", "Write", "Agent"]
 ---
 
-Build a full Notion snapshot for the current sprint. Follow steps in order.
+Build a full Notion sprint snapshot for the current sprint. Steps 2–5 are delegated to sub-agents — each agent calls MCP directly within the current session.
 
 ## Step 1 — Create snapshot directory
+
+Run via Bash:
 
 ```bash
 DIR="snapshots/$(date +%Y-%m-%d_%H%M%S)"
 mkdir -p "$DIR"
+echo "$DIR"
 ```
+
+Remember `$DIR` for all subsequent steps.
 
 ## Step 2 — Fetch sprint IDs
 
-```bash
-uv run notion/sprints.py --dir "$DIR"
-```
+Spawn the `fetch-sprints` agent with this task:
 
-Produces `$DIR/notion_sprints.json` with last/current/next sprint data.
+> Fetch sprint metadata (last/current/next) and write to `{DIR}/notion_sprints.json`
+
+Pass the snapshot directory path as context. Wait for the agent to complete and confirm `notion_sprints.json` was written before proceeding.
 
 ## Step 3 — Fetch current-sprint tasks
 
-```bash
-uv run notion/tasks.py --dir "$DIR" --sprint current
-```
+Spawn the `fetch-tasks` agent with this task:
 
-Produces `$DIR/notion_tasks.json` — clean JSON with task rows.
+> Read `{DIR}/notion_sprints.json`, fetch all tasks for the current sprint, and write to `{DIR}/notion_tasks.json`
+
+Pass the snapshot directory path as context. Wait for completion.
 
 ## Step 4 — Fetch PR data
 
-```bash
-uv run notion/prs.py --dir "$DIR"
-```
+Spawn the `fetch-prs` agent with this task:
 
-Queries the PR DB for all PR pages linked to current-sprint tasks. Produces `$DIR/notion_prs.json` — dict keyed by task Notion URL, value is list of `{number, merged, title, env, url}`. Runs in one SQL query (no per-PR round trips).
+> Read `{DIR}/notion_tasks.json`, fetch Notion PR pages for all tasks that have GitHub Pull Requests, and write to `{DIR}/notion_prs.json`
+
+Pass the snapshot directory path as context. Wait for completion.
 
 ## Step 5 — Enrich tasks with comments
 
-```bash
-uv run notion/comments.py --dir "$DIR"
-```
+Spawn the `fetch-comments` agent with this task:
 
-Calls Claude CLI once per task (5 parallel workers). Fetches comments via `notion-get-comments` MCP and saves `$DIR/notion_tasks_with_comments.json` — full task array with `recent_comments` added to each task. `notion_tasks.json` stays unchanged.
+> Read `{DIR}/notion_tasks.json`, call notion-get-comments for each task URL, and write the enriched array to `{DIR}/notion_tasks_with_comments.json`
+
+Pass the snapshot directory path as context. Wait for completion.
 
 ## Step 6 — Build AI snapshot
 
+Check if the argument contains `en`. Run via Bash:
+
 ```bash
+# argument contains "en":
+uv run notion/synthesize.py --dir "$DIR" --lang en
+
+# otherwise (default):
 uv run notion/synthesize.py --dir "$DIR"
 ```
 
-Builds skeleton **only over parent-level tasks** (subtasks fold into `parent.subtasks` metadata: `{total, done, in_progress, blocked, not_started, percent}` with progress = `(done + max(in_progress - blocked, 0) / 2) / total`). Classifies each task as `active`/`stale`/`dormant` scriptably (no AI), then calls Claude CLI once per parent in 5 parallel workers (`haiku` model). Pre-filters comments to last 4 days and passes prior snapshot's summary + open actions + subtask names/states so Claude can focus on what's NEW vs yesterday and reflect subtask progress. Returns per task: `status_summary`, `action_items`, `blocker`, `release_status` (`none|ready_to_release|sent_to_release|released` — releases are owned by another team, we hand off and wait). Auto-finds the latest older snapshot in `snapshots/` as the prior. Produces `$DIR/snapshot.json` — the canonical input for standup rendering.
+Produces `$DIR/snapshot.json`.
 
 ## Step 7 — Render output
 
-Check the argument passed when `/snapshot` was invoked:
+Check the argument:
 
-- **`/snapshot standup`** — personal daily standup → Slack:
+- **`standup`** or **`standup en`** — personal standup → Slack:
   ```bash
   uv run standup.py --snapshot-dir "$DIR" --slack
   ```
-  Filters to tasks assigned to `NOTION_USER_ID`. Requires `NOTION_USER_ID` in `.env`.
-
-- **`/snapshot review`** — full sprint review → Slack:
+- **`review`** — sprint review → Slack:
   ```bash
   uv run notion/sprint_review.py --dir "$DIR" --slack
   ```
-  Team-wide, no user filter.
+- **No argument** — print path only:
+  ```
+  Snapshot ready: $DIR/snapshot.json
+  ```
 
-- **`/snapshot`** (no argument) — skip render, print snapshot path only.
+## Error handling
+
+- If an agent fails to write its output file, stop and report which step failed.
+- `notion_prs.json` may be `{}` — valid when no tasks have PRs.
+- Empty `recent_comments: []` on tasks is normal.
+- synthesize.py errors are logged to stderr and in `snapshot.metadata.errors`.
