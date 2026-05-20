@@ -1,64 +1,104 @@
 ---
-description: Build a full Notion sprint snapshot via MCP sub-agents — fetches sprints, tasks, PRs, and comments directly in-session via Notion MCP (no subprocess Claude CLI), then runs AI synthesis. Use /snapshot any time a fresh snapshot of current sprint tasks is needed.
+description: Build a full Notion sprint snapshot — fetches sprints, tasks, PRs, and comments directly in-session via Notion MCP (no subprocess Claude CLI), then runs AI synthesis. Use /snapshot any time a fresh snapshot of current sprint tasks is needed.
 argument-hint: "[standup|review] [en]"
-allowed-tools: ["Bash", "Read", "Write", "Agent"]
+allowed-tools: ["Bash", "Read", "Write", "mcp__claude_ai_Notion__notion-query-data-sources", "mcp__claude_ai_Notion__notion-get-comments"]
 ---
 
-Build a full Notion sprint snapshot for the current sprint. Steps 2–5 are delegated to sub-agents — each agent calls MCP directly within the current session.
+Build a full Notion sprint snapshot. All Notion data fetching happens in the current session via MCP tools directly — no subprocess spawning, no agents.
 
 ## Step 1 — Create snapshot directory
-
-Run via Bash:
 
 ```bash
 DIR="snapshots/$(date +%Y-%m-%d_%H%M%S)"
 mkdir -p "$DIR"
-echo "$DIR"
 ```
 
 Remember `$DIR` for all subsequent steps.
 
 ## Step 2 — Fetch sprint IDs
 
-Spawn the `fetch-sprints` agent with this task:
+Call the Notion MCP query tool with:
+- mode: `"sql"`
+- data_source_urls: `["collection://35750979-0d9a-80a1-8b0f-000bf8fd37f8"]`
+- query:
+  ```sql
+  SELECT url, "Sprint name", "Sprint status", "Sprint ID", "date:Dates:start", "date:Dates:end"
+  FROM "collection://35750979-0d9a-80a1-8b0f-000bf8fd37f8"
+  WHERE "Sprint status" IN ('Last', 'Current', 'Next')
+  ORDER BY "Sprint ID"
+  ```
 
-> Fetch sprint metadata (last/current/next) and write to `{DIR}/notion_sprints.json`
+Parse the result. Build a JSON object keyed by lowercase sprint status (`last`, `current`, `next`):
+```json
+{
+  "current": { "url": "...", "sprint_name": "...", "sprint_id": ..., "start": "...", "end": "..." }
+}
+```
+Field mapping: `Sprint name`→`sprint_name`, `Sprint ID`→`sprint_id`, `date:Dates:start`→`start`, `date:Dates:end`→`end`.
 
-Pass the snapshot directory path as context. Wait for the agent to complete and confirm `notion_sprints.json` was written before proceeding.
+Write to `$DIR/notion_sprints.json`.
 
 ## Step 3 — Fetch current-sprint tasks
 
-Spawn the `fetch-tasks` agent with this task:
+Read `$DIR/notion_sprints.json`, extract `current.url`.
 
-> Read `{DIR}/notion_sprints.json`, fetch all tasks for the current sprint, and write to `{DIR}/notion_tasks.json`
+Call the Notion MCP query tool with:
+- mode: `"sql"`
+- data_source_urls: `["collection://35650979-0d9a-80f6-92ed-000b93238f83"]`
+- query:
+  ```sql
+  SELECT * FROM "collection://35650979-0d9a-80f6-92ed-000b93238f83"
+  WHERE "Sprint" LIKE '%{SPRINT_URL}%'
+  ```
 
-Pass the snapshot directory path as context. Wait for completion.
+Write the raw JSON array to `$DIR/notion_tasks.json`. Strip any code fences or wrapper objects — the file must contain only a valid JSON array.
 
 ## Step 4 — Fetch PR data
 
-Spawn the `fetch-prs` agent with this task:
+Read `$DIR/notion_tasks.json`. For each task, parse the `GitHub Pull Requests` field (JSON-encoded list). Collect all unique PR page URLs.
 
-> Read `{DIR}/notion_tasks.json`, fetch Notion PR pages for all tasks that have GitHub Pull Requests, and write to `{DIR}/notion_prs.json`
+If no PR URLs found: write `{}` to `$DIR/notion_prs.json` and skip.
 
-Pass the snapshot directory path as context. Wait for completion.
+Otherwise, call the Notion MCP query tool with:
+- mode: `"sql"`
+- data_source_urls: `["collection://36650979-0d9a-805f-80b4-000ba2669c0d"]`
+- query:
+  ```sql
+  SELECT url, "Title", "PR Number", "date:Merged At:start", "date:Closed At:start",
+         "Related to Paynext Data Tasks (GitHub Pull Requests)"
+  FROM "collection://36650979-0d9a-805f-80b4-000ba2669c0d"
+  WHERE url IN ('url1', 'url2', ...)
+  ```
+
+Build the index — dict keyed by task URL:
+- `merged`: true if `date:Merged At:start` or `date:Closed At:start` is non-null
+- `env`: first `[TAG]` from title via `^\[([^\]]+)\]`, else `""`
+- Sort each task's list by `number`
+
+Write to `$DIR/notion_prs.json`.
 
 ## Step 5 — Enrich tasks with comments
 
-Spawn the `fetch-comments` agent with this task:
+Read all tasks from `$DIR/notion_tasks.json`.
 
-> Read `{DIR}/notion_tasks.json`, call notion-get-comments for each task URL, and write the enriched array to `{DIR}/notion_tasks_with_comments.json`
+For each task with a non-empty `url`, call the Notion MCP get-comments tool with:
+- page_id: the task url
+- include_all_blocks: true
+- include_resolved: false
 
-Pass the snapshot directory path as context. Wait for completion.
+Parse `<comment datetime="...">TEXT</comment>` from the XML response. Strip HTML tags; skip empty. Add `recent_comments: [{text, datetime}]` (newest-first) to each task row.
+
+Write the enriched array to `$DIR/notion_tasks_with_comments.json`.
 
 ## Step 6 — Build AI snapshot
 
-Check if the argument contains `en`. Run via Bash:
+Check if the argument contains `en`:
 
 ```bash
-# argument contains "en":
+# "en" in argument:
 uv run notion/synthesize.py --dir "$DIR" --lang en
 
-# otherwise (default):
+# otherwise:
 uv run notion/synthesize.py --dir "$DIR"
 ```
 
@@ -66,24 +106,12 @@ Produces `$DIR/snapshot.json`.
 
 ## Step 7 — Render output
 
-Check the argument:
-
-- **`standup`** or **`standup en`** — personal standup → Slack:
+- **`standup`** or **`standup en`**:
   ```bash
   uv run standup.py --snapshot-dir "$DIR" --slack
   ```
-- **`review`** — sprint review → Slack:
+- **`review`**:
   ```bash
   uv run notion/sprint_review.py --dir "$DIR" --slack
   ```
-- **No argument** — print path only:
-  ```
-  Snapshot ready: $DIR/snapshot.json
-  ```
-
-## Error handling
-
-- If an agent fails to write its output file, stop and report which step failed.
-- `notion_prs.json` may be `{}` — valid when no tasks have PRs.
-- Empty `recent_comments: []` on tasks is normal.
-- synthesize.py errors are logged to stderr and in `snapshot.metadata.errors`.
+- **No argument**: print `Snapshot ready: $DIR/snapshot.json`

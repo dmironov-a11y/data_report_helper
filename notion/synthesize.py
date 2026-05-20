@@ -25,6 +25,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timezone
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
 from lib.config import NOTION_USER_ID
 
 RELEASE_STATUSES = ("none", "ready_to_release", "sent_to_release", "released")
