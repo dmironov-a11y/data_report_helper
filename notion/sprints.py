@@ -2,9 +2,9 @@
 """Fetch Notion sprint info (last/current/next) via Claude + MCP, save to JSON.
 
 Usage:
-    uv run notion_sprints.py                                    # save to snapshots/YYYY-MM-DD_HHMMSS/
-    uv run notion_sprints.py --dir snapshots/2026-05-07_demo   # specific snapshot dir
-    uv run notion_sprints.py --model sonnet
+    uv run notion/sprints.py                                    # save to snapshots/YYYY-MM-DD_HHMMSS/
+    uv run notion/sprints.py --dir snapshots/2026-05-07_demo   # specific snapshot dir
+    uv run notion/sprints.py --model sonnet
 """
 import argparse
 import json
@@ -18,8 +18,11 @@ SPRINTS_DB = "collection://35750979-0d9a-80a1-8b0f-000bf8fd37f8"
 
 
 def run_claude(prompt: str, model: str) -> str:
-    cmd = ["claude", "--print", "--model", model, prompt]
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    cmd = [
+        "claude", "--print", "--model", model,
+        "--allowedTools", "mcp__claude_ai_Notion__notion-query-data-sources",
+    ]
+    result = subprocess.run(cmd, input=prompt, capture_output=True, text=True, timeout=120)
     if result.returncode != 0:
         print(f"Claude error:\n{result.stderr}", file=sys.stderr)
         sys.exit(1)

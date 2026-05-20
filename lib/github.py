@@ -4,7 +4,7 @@ from datetime import date, datetime, timezone
 
 from lib.config import GITHUB_TOKEN, GITHUB_ORG, GITHUB_USERNAME, GITHUB_EXTRA_REPOS
 
-TICKET_RE = re.compile(r'\b(DATA-\d+)\b', re.IGNORECASE)
+TICKET_RE = re.compile(r'\b((?:PNXT-)?DATA-\d+)\b', re.IGNORECASE)
 MERGE_RE = re.compile(r'^Merge ', re.IGNORECASE)
 COMMIT_RE = re.compile(r'^(`[0-9a-f]+`) (.+) \((https?://\S+)\)$')
 

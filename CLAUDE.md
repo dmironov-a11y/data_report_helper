@@ -4,36 +4,50 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Running the scripts
 
-### standup.py — daily standup report
+### Notion snapshot pipeline — `/snapshot [standup|review]`
+
+The primary workflow. Run via the `/snapshot` skill inside Claude Code. Steps in order:
 
 ```bash
-uv run standup.py                                    # report for previous working day
-uv run standup.py --standup-date 2026-03-25          # report on March 25
-uv run standup.py --add-links                        # include Plane and GitHub URLs in output
-uv run standup.py --slack                            # send report to Slack DM
-uv run standup.py --commits in_progress              # show commits under in-progress tasks
-uv run standup.py --commits done in_progress         # show commits under done + in-progress
-uv run standup.py --commits all                      # show commits for all groups + orphans
-uv run standup.py --standup-date 2026-03-25 --slack --commits all --add-links      # full featured run
+uv run notion/sprints.py --dir snapshots/<dir>                 # fetch sprint metadata (last/current/next)
+uv run notion/tasks.py --dir snapshots/<dir> --sprint current  # fetch current sprint tasks
+uv run notion/prs.py --dir snapshots/<dir>                     # fetch PR pages linked to tasks → notion_prs.json
+uv run notion/comments.py --dir snapshots/<dir>                # enrich tasks with recent comments
+uv run notion/synthesize.py --dir snapshots/<dir>              # AI summaries per ALL parent tasks → snapshot.json
 ```
 
-### sprints.py — sprint cycles view + rename
+Invocation variants:
+- `/snapshot` — build snapshot only (no render)
+- `/snapshot standup` — build + personal daily standup → Slack (requires `NOTION_USER_ID`)
+- `/snapshot review` — build + sprint review → Slack (team-wide)
+
+### notion/sprint_review.py — sprint review (detailed, with AI summaries + thread)
 
 ```bash
-uv run sprints.py                                    # show current + next cycle issues in terminal
-uv run sprints.py --slack                            # send cycles report to Slack DM
-uv run sprints.py --rename-tasks --dry-run           # AI rename proposals for next cycle (no changes applied)
-uv run sprints.py --rename-tasks --dry-run --cycle current   # same for current cycle
-uv run sprints.py --rename-tasks --dry-run --cycle both      # both cycles
-uv run sprints.py --rename-tasks                     # propose + confirm + apply renames to Plane
-uv run sprints.py --rename-tasks DATA-123            # rename single issue
-uv run sprints.py --rename-tasks DATA-123 --dry-run  # preview rename for single issue
+uv run notion/sprint_review.py --dir snapshots/2026-05-20_084636          # write standup_main.txt + standup_thread.txt
+uv run notion/sprint_review.py --dir snapshots/2026-05-20_084636 --slack  # also post to Slack DM
+```
+
+### standup.py — daily async standup (Data Async Daily Status format)
+
+Reads tasks from the latest `snapshot.json`, filters by assignee, merges with GitHub commits.
+**Requires** a user ID — either `NOTION_USER_ID` in `.env` or `--user` flag.
+
+```bash
+uv run standup.py                                    # latest snapshot + commits for previous working day
+uv run standup.py --user "user://2e8d..."            # override user (run standup for another person)
+uv run standup.py --standup-date 2026-03-25          # override commit date range
+uv run standup.py --snapshot-dir snapshots/2026-05-20_084636  # use specific snapshot
+uv run standup.py --add-links                        # include Notion and GitHub URLs in output
+uv run standup.py --slack                            # send report to Slack DM
+uv run standup.py --commits in_progress              # show commits in in-progress section
+uv run standup.py --commits all                      # show commits for all groups + orphans
+uv run standup.py --standup-date 2026-03-25 --slack --commits all --add-links
 ```
 
 ## Environment setup
 
 Copy `.env.example` to `.env` and fill in credentials. Required variables:
-- `PLANE_API_KEY`, `PLANE_WORKSPACE_SLUG`, `PLANE_PROJECT_ID`
 - `GITHUB_TOKEN` (needs `repo` + `read:org` scopes; authorize SSO for the org at github.com/settings/tokens)
 - `GITHUB_ORG`, `GITHUB_USERNAME`
 - `SLACK_BOT_TOKEN` (optional, needed for `--slack`; needs `chat:write` scope)
@@ -41,42 +55,49 @@ Copy `.env.example` to `.env` and fill in credentials. Required variables:
 
 ## Architecture
 
-Two entry points with shared `lib/` package:
-- `standup.py` — standup mode only
-- `sprints.py` — cycles view (default) + rename mode (`--rename-tasks`)
+Entry points and shared `lib/` package:
 
 ```
+notion/
+  sprints.py       # fetch sprint metadata from Notion DB
+  tasks.py         # fetch current sprint tasks from Notion DB
+  comments.py      # enrich tasks with comments (parallel, 5 workers)
+  synthesize.py    # build AI snapshot: parent tasks + subtask metadata + per-task Claude summary
+  render_standup.py # render standup_main.txt + standup_thread.txt from snapshot.json
+standup.py         # old-format standup (Done/In Progress/Blocked) from snapshot + GitHub commits
+
 lib/
-  config.py   # env constants, validate_config, parse_date_arg
-  plane.py    # Plane API helpers (plane_get, plane_patch, get_*, build_issue_url...)
+  config.py   # env constants, parse_date_arg
   github.py   # GitHub helpers (get_github_commits, TICKET_RE, ...)
   slack.py    # send_to_slack
   report.py   # build_report, build_slack_report, prev_workday, workday_range
-  cycles.py   # _build_cycle_message, build_cycle_messages
-  rename.py   # RENAME_SYSTEM_PROMPT, ai_rename, run_rename_mode
 ```
 
-### Standup mode (default)
+### Notion snapshot pipeline
 
-Data sources:
+Data flow: `notion/sprints.py` → `notion/tasks.py` → `notion/comments.py` → `notion/synthesize.py` → `snapshot.json`
 
-1. **Plane.so API** — fetches authenticated user via `/users/me/`, then paginates all issues for the configured project and filters client-side by assignee (the API ignores the `assignees` query param). Issues are classified by `state.group` and `updated_at` date.
+1. **notion/sprints.py** — queries the Sprints DB (`collection://35750979-…`) via `notion-query-data-sources` MCP, saves `notion_sprints.json` with last/current/next sprint URLs and date ranges.
 
-2. **GitHub API** (PyGithub) — fetches commits by `GITHUB_USERNAME` for the target day by scanning the default branch of every repo in the org.
+2. **notion/tasks.py** — queries the Tasks DB (`collection://35650979-…`), filters by current sprint URL, saves `notion_tasks.json`.
 
-3. **Report builder** — merges Plane active issues with GitHub commits into a `worked_on` dict, builds plain-text standup output. Commits for done tasks go into a separate `done_commits` dict.
+3. **notion/comments.py** — calls `notion-get-comments` MCP once per task (5 parallel workers), adds `recent_comments` to each task, saves `notion_tasks_with_comments.json`.
 
-4. **Slack sender** — builds a separate mrkdwn-formatted message with clickable `<url|DATA-XXX>` links and linked commit SHAs, sends via `chat.postMessage` to the user's DM.
+4. **notion/synthesize.py** — builds skeleton over parent-level tasks only (subtasks folded into `parent.subtasks`), classifies each as active/stale/dormant, calls Claude CLI once per parent (5 parallel workers, haiku model). Output: `snapshot.json` with per-task `status_summary`, `action_items`, `blocker`, `release_status`.
 
-#### Issue classification order (order matters)
+### standup.py — task classification from snapshot
 
 ```
-backlog/unstarted  → backlog list (shown in terminal only, no date filter)
-completed          → done list (only if completed_at on report date)
-"review" in name   → review list (only if completed_at on report date)
-blocked label      → blocked list
-started            → plane_active (merged with GitHub commits into worked_on, no date filter)
+group == "done"                          → done list
+group == "review"                        → review list (moved to review)
+blocked_by or action_required_from       → blocked list
+group in ("started","skipped"),
+  state not in (todo, inbox)             → active (worked_on)
+state in (todo, inbox) or group==backlog → backlog list (terminal only)
+group == "cancelled"                     → skipped
 ```
+
+GitHub commits cannot be matched to Notion task IDs. All ticketed commits appear as standalone entries in the In Progress section.
 
 #### Commit groups (`--commits`)
 
@@ -84,7 +105,7 @@ started            → plane_active (merged with GitHub commits into worked_on, 
 |--------------|--------------------------------------------------|
 | `done`       | Commits linked to done/review tasks              |
 | `in_progress`| Commits linked to in-progress tasks              |
-| `orphan`     | Commits with no DATA-XXXX ticket in message      |
+| `orphan`     | Commits with no ticket ID in message             |
 | `all`        | Shorthand for all three groups above             |
 
 #### Output
@@ -93,60 +114,6 @@ started            → plane_active (merged with GitHub commits into worked_on, 
 - Report body (without header line) copied to macOS clipboard via `pbcopy`
 - Backlog printed to terminal after the report (not copied)
 - If `--slack` is set: separate mrkdwn-formatted message sent to your Slack DM
-
-### Cycles mode (sprints.py default)
-
-Fetches current and next sprint cycles from Plane and sends them as **two separate Slack messages**.
-
-1. **Cycle detection** — calls `/cycles/` for the project, determines current (`start_date ≤ now ≤ end_date`) and next (nearest upcoming by `start_date`) cycles. `status` field from API may be `null`, so dates are used as fallback.
-
-2. **Issues** — fetches all issues in each cycle via `/cycles/{id}/cycle-issues/`. One request per cycle (no pagination needed for typical cycle sizes).
-
-3. **Tree rendering** — issues are displayed as a parent→children tree:
-   - If a child's parent is in the same cycle, it's nested under the parent with `↳`
-   - If a parent is referenced but not in the cycle, it's fetched individually and used as a synthetic root node
-   - Issues that are children of a known parent are excluded from the flat top-level list (no duplicates)
-
-4. **Members** — workspace members are fetched once via `/workspaces/{slug}/members/` to resolve assignee UUIDs to `display_name`.
-
-5. **Output** — two mrkdwn messages (current cycle, next cycle), each grouped by state group (completed / started / unstarted / backlog / cancelled) with progress counter.
-
-### Rename mode (sprints.py --rename-tasks)
-
-Uses local `claude` CLI (no API key needed, uses subscription) to propose AI-generated renames for issues in the selected cycle, then optionally applies them to Plane via PATCH.
-
-#### Flags
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--cycle next` | ✓ | Rename issues in next cycle only |
-| `--cycle current` | | Rename issues in current cycle only |
-| `--cycle both` | | Rename issues in current + next cycles |
-| `--dry-run` | | Show proposals, do not apply or prompt |
-
-Without `--dry-run`: shows proposal table, then asks `[y/N]` confirmation before writing to Plane.
-
-#### Naming manifest
-
-Format: `[Type] Area: Short Description`
-
-| Tag | When to use |
-|-----|-------------|
-| `[Chart]` | New or updated chart/dashboard UI |
-| `[Feature]` | Business feature (filters, drill-down, new tab) |
-| `[Fix]` | Bug or incorrect logic/calculation |
-| `[BE]` | Tinybird endpoint, pipeline, data transformation |
-| `[FE]` | Frontend implementation (React, UI wiring, prod deploy) |
-| `[Research]` | Investigation, benchmark, validation with BQ/stakeholders |
-| `[Doc]` | Documentation, tooltips, descriptions |
-| `[QA]` | Testing, comparison with BigQuery |
-| `[Infra]` | Infrastructure (workspace, alerting, MCP setup) |
-
-Rules:
-- Type tag always present, Title Case (`[Chart]` not `[chart]`)
-- Area = short tab name: Payments, Declines, 3DS, BIN, Filters, Subscriptions, Tinybird, Metrics, Infra
-- Top-level tasks (no parent) → lean toward `[Feature]` / `[Research]`
-- Sub-tasks (has parent) → lean toward `[BE]` / `[FE]` / `[Chart]` / `[Fix]`
 
 # important-instruction-reminders
 Do what has been asked; nothing more, nothing less.

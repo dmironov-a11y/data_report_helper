@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Build the final snapshot.json: skeleton + per-task AI synthesis (parallel).
 
-Reads `$DIR/notion_tasks_with_comments.json` (produced by notion_comments.py),
+Reads `$DIR/notion_tasks_with_comments.json` (produced by notion/comments.py),
 optionally loads a prior `snapshot.json` to anchor summaries against yesterday,
 then calls Claude CLI once per task in N parallel workers (haiku model) to
 produce a structured one-line JSON per task: status_summary, action_items,
@@ -25,12 +25,16 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timezone
 from pathlib import Path
 
+from lib.config import NOTION_USER_ID
+
 RELEASE_STATUSES = ("none", "ready_to_release", "sent_to_release", "released")
 
 
-def run_claude(prompt: str, model: str, timeout: int = 120) -> str:
-    cmd = ["claude", "--print", "--model", model, prompt]
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+def run_claude(prompt: str, model: str, timeout: int = 120, allowed_tools: list[str] | None = None) -> str:
+    cmd = ["claude", "--print", "--model", model]
+    for tool in (allowed_tools or []):
+        cmd += ["--allowedTools", tool]
+    result = subprocess.run(cmd, input=prompt, capture_output=True, text=True, timeout=timeout)
     if result.returncode != 0:
         raise RuntimeError(result.stderr.strip() or "claude exited non-zero")
     return result.stdout.strip()
@@ -280,9 +284,24 @@ def _row_to_task(r: dict, url_to_id: dict[str, int]) -> dict:
         except (json.JSONDecodeError, ValueError, TypeError):
             pass
 
+    raw_name = r.get("Task name", "") or ""
+    name = re.sub(r'^PNXT-DATA-\d+\s*[-–]\s*', '', raw_name).strip()
+
+    assignees_raw = r.get("Assignees", "") or ""
+    try:
+        assignees = json.loads(assignees_raw) if assignees_raw else []
+    except (json.JSONDecodeError, ValueError):
+        assignees = []
+
+    pr_raw = r.get("GitHub Pull Requests", "") or ""
+    try:
+        pr_urls = json.loads(pr_raw) if pr_raw else []
+    except (json.JSONDecodeError, ValueError):
+        pr_urls = []
+
     return {
         "id": r.get("userDefined:ID"),
-        "name": r.get("Task name", "") or "",
+        "name": name,
         "url": url,
         "state": state,
         "group": get_state_group(state),
@@ -291,6 +310,9 @@ def _row_to_task(r: dict, url_to_id: dict[str, int]) -> dict:
         "blocked_by": has_value(r.get("Blocked by")),
         "action_required_from": has_value(r.get("Action required from")),
         "recent_comments": r.get("recent_comments") or [],
+        "assignees": assignees,
+        "pr_urls": pr_urls,
+        "prs": [],
     }
 
 
@@ -362,7 +384,7 @@ def render_subtasks_block(sub: dict | None) -> str:
 
 
 def build_prompt(task: dict, recent_window: list[dict], prior: dict | None,
-                 window_days: int) -> str:
+                 window_days: int, lang: str = "ru") -> str:
     name = task["name"]
     state = task["state"] or "(no state)"
     if prior and prior.get("status_summary"):
@@ -379,6 +401,32 @@ def build_prompt(task: dict, recent_window: list[dict], prior: dict | None,
     comments_block = render_comments_block(recent_window)
     subtasks_block = render_subtasks_block(task.get("subtasks"))
     subtasks_section = f"\n{subtasks_block}\n" if subtasks_block else ""
+
+    if lang == "en":
+        return (
+            "Task summary for daily standup. Return ONLY a single-line JSON, no comments, no wrapping.\n\n"
+            f"Task: {name}\n"
+            f"State: {state}\n"
+            f"Yesterday's summary: {prior_summary}\n"
+            f"Open action items from yesterday: {prior_actions}\n"
+            f"{subtasks_section}\n"
+            f"Recent comments (last {window_days} days, newest first):\n"
+            f"{comments_block}\n\n"
+            'Return JSON: {"status_summary": "ONE short sentence in English — focus on what is NEW vs yesterday and subtask progress (if any); if nothing new — briefly state that", '
+            '"action_items": [{"owner": "name from comments / @user / ?", "action": "brief in English"}], '
+            '"blocker": {"is_blocker": bool, "description": "brief in English or null"}, '
+            '"release_status": "none | ready_to_release | sent_to_release | released"}\n\n'
+            "RULES for owner in action_items: use the NAME from comments (e.g. 'Lisa', 'Grisha', 'V. Budruev') OR role ('frontend', 'BE'). "
+            "If a @user is mentioned but the name is unclear — write `@user` or `?`. "
+            "DO NOT invent names/roles — no 'author', 'developer', 'assignee', 'team', 'task owner', 'unassigned' etc. "
+            "If unclear who is responsible — use `?`.\n\n"
+            "Release status (releases are handled by another team — we hand off and wait):\n"
+            '- "ready_to_release": work done, ready to hand off (e.g. "ready to release", "PR merged, awaiting deploy")\n'
+            '- "sent_to_release": already handed to release team, waiting (e.g. "sent to release", "queued for release", "waiting for infra/devops")\n'
+            '- "released": confirmed prod (e.g. "released", "deployed", "shipped to prod", "in prod")\n'
+            '- "none": none of the above\n'
+            "ALL text fields (status_summary, action_items.action, blocker.description) must be in English, even if comments are in another language."
+        )
 
     return (
         "Сводка задачи для дейли-стендапа. Верни ТОЛЬКО однострочный JSON, без комментариев и без обрамления.\n\n"
@@ -407,8 +455,8 @@ def build_prompt(task: dict, recent_window: list[dict], prior: dict | None,
 
 
 def synthesize_one(task: dict, recent_window: list[dict], prior: dict | None,
-                   model: str, window_days: int) -> dict:
-    prompt = build_prompt(task, recent_window, prior, window_days)
+                   model: str, window_days: int, lang: str = "ru") -> dict:
+    prompt = build_prompt(task, recent_window, prior, window_days, lang)
     try:
         text = run_claude(prompt, model)
     except (RuntimeError, subprocess.TimeoutExpired) as e:
@@ -478,6 +526,8 @@ def main() -> None:
     ap.add_argument("--comment-window-days", type=int, default=4)
     ap.add_argument("--stale-days", type=int, default=2)
     ap.add_argument("--model", default="haiku", choices=["haiku", "sonnet", "opus"])
+    ap.add_argument("--lang", default="ru", choices=["ru", "en"],
+                    help="Language for AI summaries: ru (default) or en")
     args = ap.parse_args()
 
     snap_dir = args.dir
@@ -522,6 +572,18 @@ def main() -> None:
         t["days_since_last_comment"] = ds
         t["staleness"] = classify_staleness(t["group"], ds, args.stale_days)
 
+    # Enrich tasks with PR info from notion_prs.json (produced by notion/prs.py)
+    prs_path = os.path.join(snap_dir, "notion_prs.json")
+    if os.path.exists(prs_path):
+        with open(prs_path) as f:
+            prs_by_task_url: dict[str, list] = json.load(f)
+        for t in tasks:
+            if t.get("url") in prs_by_task_url:
+                t["prs"] = prs_by_task_url[t["url"]]
+        print(f"PR data loaded from {prs_path}", file=sys.stderr)
+    else:
+        print(f"warn: {prs_path} not found — run notion/prs.py first to include PR data", file=sys.stderr)
+
     # Decide which tasks need AI
     windows = {
         t["id"]: filter_recent_comments(t["recent_comments"], args.comment_window_days, now)
@@ -545,6 +607,7 @@ def main() -> None:
                     prior_index.get(t["id"]),
                     args.model,
                     args.comment_window_days,
+                    args.lang,
                 ): t for t in targets
             }
             done = 0

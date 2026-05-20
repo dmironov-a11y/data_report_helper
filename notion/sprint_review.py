@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""Рендерит standup-отчёт (main + thread) из snapshot.json — на русском.
+"""Рендерит sprint review (main + thread) из snapshot.json — на русском.
 
 Создаёт два файла в формате Slack mrkdwn:
 - standup_main.txt    — короткий фоллоуап с группами и фокусом дня
 - standup_thread.txt  — детали по каждой задаче
 
 Usage:
-    uv run render_standup.py --dir snapshots/2026-05-08_morning
-    uv run render_standup.py --dir ... --prev-dir ...
-    uv run render_standup.py --dir ... --slack
+    uv run notion/sprint_review.py --dir snapshots/2026-05-08_morning
+    uv run notion/sprint_review.py --dir ... --prev-dir ...
+    uv run notion/sprint_review.py --dir ... --slack
 """
 import argparse
 import glob
@@ -276,44 +276,28 @@ def build_main(snapshot: dict, prior: dict | None, stale_days: int,
 
     out = [header_top, sprint_line, "", build_focus_line(grouped), ""]
 
-    any_section = False
+    # Count tasks by status
+    counts = []
     for cat in MAIN_GROUPS:
         items = grouped.get(cat) or []
-        if not items:
-            continue
-        any_section = True
-        out.append(LABEL[cat])
-        for t in items:
-            line = f"• {lbl(t)}"
-            summary = (t.get("status_summary") or "").strip()
-            if cat == "blocked":
-                reasons = []
-                if t.get("blocked_by"):
-                    reasons.append("блок-задача")
-                if t.get("action_required_from"):
-                    reasons.append("ждём ответа")
-                tail = " / ".join(reasons) if reasons else "ожидает"
-                if summary:
-                    line += f" — {summary} _({tail})_"
-                else:
-                    line += f" — _{tail}_"
-            elif summary:
-                line += f" — {summary}"
-            sub_progress = render_subtask_progress(t.get("subtasks"))
-            if sub_progress:
-                line += f"  {sub_progress}"
-            out.append(line)
-            out.extend(render_action_items(t, indent="    "))
-        out.append("")
+        if items:
+            emoji = LABEL[cat].split()[0]
+            label_short = LABEL[cat].split("*")[1] if "*" in LABEL[cat] else cat
+            counts.append(f"{emoji} {len(items)}")
 
-    if not any_section:
+    if counts:
+        out.append(" · ".join(counts))
+    else:
         out.append("_Нет актуальных задач в работе, релизе или заблокированных._")
+
+    out.append("")
+    out.append("📋 *Детали в треде ↓*")
 
     return "\n".join(out).rstrip() + "\n"
 
 
 def build_thread(snapshot: dict, grouped: dict[str, list[dict]]) -> str:
-    """Per-task детали для треда: всё, что не вошло в main. Все задачи здесь parent-уровня."""
+    """Per-task детали для треда: ВСЕ задачи со всеми деталями."""
 
     def render_task(t: dict, compact: bool = False) -> list[str]:
         head = f"*{lbl(t)}*  _{t.get('state') or '?'}_"
@@ -336,7 +320,8 @@ def build_thread(snapshot: dict, grouped: dict[str, list[dict]]) -> str:
         return lines
 
     out: list[str] = []
-    for cat in THREAD_GROUPS:
+    all_groups = MAIN_GROUPS + THREAD_GROUPS
+    for cat in all_groups:
         items = grouped.get(cat) or []
         if not items:
             continue
@@ -353,7 +338,7 @@ def build_thread(snapshot: dict, grouped: dict[str, list[dict]]) -> str:
 
 
 def post_slack(main_path: str, thread_path: str) -> None:
-    repo_root = Path(__file__).resolve().parent
+    repo_root = Path(__file__).resolve().parent.parent
     script = repo_root / "slack_threaded.py"
     if not script.exists():
         print(f"slack_threaded.py не найден: {script}", file=sys.stderr)

@@ -144,7 +144,15 @@ def build_slack_report(
     lines.append(f"\n{bold(SEC_IN_PROGRESS)}")
     if worked_on:
         for ticket, info in sorted(worked_on.items()):
-            lines.append(issue_line(ticket, info.get("title", ""), info.get("url", "")))
+            state_suffix = f" _({info['state']})_" if info.get("state") else ""
+            prs = info.get("prs", [])
+            pr_suffix = "".join(
+                f" · <{p['url']}|PR #{p['number']}{' [' + p['env'] + ']' if p.get('env') else ''}>{'  ✓' if p.get('merged') else ''}"
+                if p.get("url") else
+                f" · PR #{p['number']}{' [' + p['env'] + ']' if p.get('env') else ''}{'  ✓' if p.get('merged') else ''}"
+                for p in prs if p.get("number")
+            )
+            lines.append(issue_line(ticket, info.get("title", ""), info.get("url", ""), suffix=state_suffix + pr_suffix))
             if "in_progress" in show_commits:
                 lines.extend(_render_commits_slack(info.get("commits", [])))
     else:
@@ -218,7 +226,14 @@ def build_report(
     lines.append(f"\n{SEC_IN_PROGRESS}")
     if worked_on:
         for ticket, info in sorted(worked_on.items()):
-            lines.append(issue_line(ticket, info.get("title", ""), info.get("url", "")))
+            state_suffix = f" ({info['state']})" if info.get("state") else ""
+            prs = info.get("prs", [])
+            pr_suffix = "".join(
+                (f" · PR #{p['number']}{' [' + p['env'] + ']' if p.get('env') else ''}{'  ✓' if p.get('merged') else ''}"
+                 + (f" {p['url']}" if add_links and p.get("url") else ""))
+                for p in prs if p.get("number")
+            )
+            lines.append(issue_line(ticket, info.get("title", ""), info.get("url", ""), suffix=state_suffix + pr_suffix))
             if "in_progress" in show_commits:
                 lines.extend(_render_commits_plain(info.get("commits", []), add_links))
     else:

@@ -6,14 +6,14 @@ Two modes:
   --prompt:          Use natural language prompt for MCP tool
 
 Usage:
-    uv run notion_tasks.py                                   # SQL mode → snapshots/YYYY-MM-DD_HHMMSS/
-    uv run notion_tasks.py --prompt                          # Prompt mode
-    uv run notion_tasks.py --dir snapshots/2026-05-07_demo   # save to specific snapshot dir
-    uv run notion_tasks.py --model sonnet                    # use Sonnet instead of Haiku
-    uv run notion_tasks.py --sprint current                  # filter by current sprint (default)
-    uv run notion_tasks.py --sprint all                      # fetch all tasks (no sprint filter)
+    uv run notion/tasks.py                                   # SQL mode → snapshots/YYYY-MM-DD_HHMMSS/
+    uv run notion/tasks.py --prompt                          # Prompt mode
+    uv run notion/tasks.py --dir snapshots/2026-05-07_demo   # save to specific snapshot dir
+    uv run notion/tasks.py --model sonnet                    # use Sonnet instead of Haiku
+    uv run notion/tasks.py --sprint current                  # filter by current sprint (default)
+    uv run notion/tasks.py --sprint all                      # fetch all tasks (no sprint filter)
 
-Sprint filtering requires notion_sprints.json in the snapshot dir (run notion_sprints.py first).
+Sprint filtering requires notion_sprints.json in the snapshot dir (run notion/sprints.py first).
 """
 import argparse
 import json
@@ -28,10 +28,13 @@ TASKS_DB = "collection://35650979-0d9a-80f6-92ed-000b93238f83"
 
 def run_claude(prompt: str, model: str) -> str:
     """Run Claude with --print and return stdout."""
-    cmd = ["claude", "--print", "--model", model, prompt]
+    cmd = [
+        "claude", "--print", "--model", model,
+        "--allowedTools", "mcp__claude_ai_Notion__notion-query-data-sources",
+    ]
     result = subprocess.run(
         cmd,
-        capture_output=True, text=True, timeout=120,
+        input=prompt, capture_output=True, text=True, timeout=120,
     )
     if result.returncode != 0:
         print(f"Claude error:\n{result.stderr}", file=sys.stderr)
