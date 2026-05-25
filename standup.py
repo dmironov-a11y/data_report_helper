@@ -21,7 +21,9 @@ from lib.github import get_github_commits, title_from_commits
 from lib.report import prev_workday, workday_range, build_report, build_slack_report
 from lib.slack import send_to_slack
 
-BACKLOG_STATES = {"todo", "inbox"}
+COMPLETE_STATES = {"to release", "done", "cancelled"}
+IN_PROGRESS_STATES = {"in progress", "in review", "monitoring", "ready for integration", "in integration"}
+BACKLOG_STATES = {"todo", "inbox", "backlog", "paused"}
 
 _DATA_TICKET_RE = re.compile(r'(?:PNXT-)?DATA-(\d+)$', re.IGNORECASE)
 
@@ -49,7 +51,7 @@ def _load_prev_done_idents(prev_path: str) -> set[str]:
     try:
         with open(prev_path) as f:
             snap = json.load(f)
-        return {f"#{t['id']}" for t in snap.get("tasks", []) if t.get("group") in ("done", "review")}
+        return {f"#{t['id']}" for t in snap.get("tasks", []) if t.get("group") in ("done", "review", "to release")}
     except (OSError, json.JSONDecodeError, KeyError):
         return set()
 
@@ -96,14 +98,14 @@ def load_snapshot(path: str) -> dict:
 
 
 def classify_tasks(tasks: list[dict]) -> tuple[
-    list[tuple[str, str, str]],
-    list[tuple[str, str, str]],
+    list[dict],
+    list[dict],
     list[tuple[str, str, str]],
     list[tuple[str, str, str]],
     dict[str, dict],
 ]:
-    done_issues: list[tuple[str, str, str]] = []
-    review_issues: list[tuple[str, str, str]] = []
+    done_issues: list[dict] = []
+    review_issues: list[dict] = []
     blocked_issues: list[tuple[str, str, str]] = []
     backlog_issues: list[tuple[str, str, str]] = []
     active: dict[str, dict] = {}
@@ -114,22 +116,19 @@ def classify_tasks(tasks: list[dict]) -> tuple[
         ident = f"#{task['id']}"
         name = task["name"]
         url = task.get("url", "")
-        group = task.get("group", "")
         state = task.get("state") or ""
         state_lower = state.lower()
         is_blocked = task.get("blocked_by") or task.get("action_required_from")
 
-        if group == "done":
-            done_issues.append((ident, name, url))
-        elif group == "review":
-            review_issues.append((ident, name, url))
+        # Classify by state from Notion
+        if state_lower in COMPLETE_STATES:
+            done_issues.append({"id": ident, "title": name, "url": url, "state": state})
         elif is_blocked:
             blocked_issues.append((ident, name, url))
-        elif group in ("started", "skipped") and state_lower not in BACKLOG_STATES:
+        elif state_lower in IN_PROGRESS_STATES:
             active[ident] = {"title": name, "url": url, "state": state, "prs": task.get("prs", [])}
-        elif state_lower in BACKLOG_STATES or group == "backlog":
+        elif state_lower in BACKLOG_STATES:
             backlog_issues.append((ident, name, url))
-        # group == "cancelled" → skip
 
     return done_issues, review_issues, blocked_issues, backlog_issues, active
 
@@ -203,8 +202,8 @@ def main() -> None:
     prev_snap = _find_prev_snapshot(snapshot_path)
     if prev_snap:
         prev_done = _load_prev_done_idents(prev_snap)
-        done_issues = [(i, n, u) for i, n, u in done_issues if i not in prev_done]
-        review_issues = [(i, n, u) for i, n, u in review_issues if i not in prev_done]
+        done_issues = [t for t in done_issues if t["id"] not in prev_done]
+        review_issues = [t for t in review_issues if t["id"] not in prev_done]
         print(f"Done diff vs {prev_snap}: {len(done_issues) + len(review_issues)} newly completed", file=sys.stderr)
     else:
         print("[WARN] No snapshot found for previous working day — showing all done tasks", file=sys.stderr)
@@ -226,7 +225,7 @@ def main() -> None:
     commits_by_ticket, orphan_commits = {}, []
 
     worked_on: dict[str, dict] = {}
-    done_ids = {i for i, _, _ in done_issues} | {i for i, _, _ in review_issues}
+    done_ids = {t["id"] for t in done_issues} | {t["id"] for t in review_issues}
     done_commits: dict[str, list[str]] = {}
 
     for ticket, commit_lines in commits_by_ticket.items():

@@ -110,8 +110,8 @@ def _render_commits_plain(commits: list[str], add_links: bool) -> list[str]:
 # ---------------------------------------------------------------------------
 
 def build_slack_report(
-    done_issues: list[tuple[str, str, str]],
-    review_issues: list[tuple[str, str, str]],
+    done_issues: list[dict],
+    review_issues: list[dict],
     worked_on: dict[str, dict],
     blocked_issues: list[tuple[str, str, str]],
     backlog_issues: list[tuple[str, str, str]],
@@ -138,11 +138,13 @@ def build_slack_report(
         return f"{parts[0]} *{parts[1]}*" if len(parts) == 2 else f"*{s}*"
 
     lines.append(bold(SEC_DONE))
-    all_done = list(done_issues) + [(i, t, u) for i, t, u in review_issues]
-    review_ids = {i for i, _, _ in review_issues}
-    if all_done:
-        for iss_id, iss_title, iss_url in all_done:
-            suffix = " _(moved to review)_" if iss_id in review_ids else ""
+    if done_issues:
+        for task in done_issues:
+            iss_id = task["id"]
+            iss_title = task["title"]
+            iss_url = task["url"]
+            state = task.get("state", "")
+            suffix = f" _({state})_" if state else ""
             lines.append(issue_line(iss_id, iss_title, iss_url, suffix=suffix))
             if "done" in show_commits:
                 lines.extend(_render_commits_slack(done_commits.get(iss_id, [])))
@@ -169,7 +171,7 @@ def build_slack_report(
         lines.append("• —")
 
     if "in_progress" in show_commits:
-        done_ids = {iss_id for iss_id, _, _ in done_issues} | {iss_id for iss_id, _, _ in review_issues}
+        done_ids = {t["id"] for t in done_issues} | {t["id"] for t in review_issues}
         orphan_tickets = {t for t in commits_by_ticket if t not in worked_on and t not in done_ids}
         if orphan_tickets:
             lines.append(f"\n{bold(SEC_UNKNOWN_TICKETS)}")
@@ -200,8 +202,8 @@ def build_slack_report(
 
 
 def build_report(
-    done_issues: list[tuple[str, str, str]],
-    review_issues: list[tuple[str, str, str]],
+    done_issues: list[dict],
+    review_issues: list[dict],
     worked_on: dict[str, dict],
     blocked_issues: list[tuple[str, str, str]],
     workday: date,
@@ -222,11 +224,13 @@ def build_report(
         return f"• {ident}{' — ' + title if title else ''}{suffix}{link}"
 
     lines.append(SEC_DONE)
-    all_done = list(done_issues) + [(i, t, u) for i, t, u in review_issues]
-    review_ids = {i for i, _, _ in review_issues}
-    if all_done:
-        for iss_id, iss_title, iss_url in all_done:
-            suffix = " (moved to review)" if iss_id in review_ids else ""
+    if done_issues:
+        for task in done_issues:
+            iss_id = task["id"]
+            iss_title = task["title"]
+            iss_url = task["url"]
+            state = task.get("state", "")
+            suffix = f" ({state})" if state else ""
             lines.append(issue_line(iss_id, iss_title, iss_url, suffix=suffix))
             if "done" in show_commits:
                 lines.extend(_render_commits_plain(done_commits.get(iss_id, []), add_links))
