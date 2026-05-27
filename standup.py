@@ -51,7 +51,8 @@ def _load_prev_done_idents(prev_path: str) -> set[str]:
     try:
         with open(prev_path) as f:
             snap = json.load(f)
-        return {f"#{t['id']}" for t in snap.get("tasks", []) if t.get("group") in ("done", "review", "to release")}
+        return {f"#{t['id']}" for t in snap.get("tasks", [])
+                if t.get("state", "").lower() in ("done", "to release", "cancelled")}
     except (OSError, json.JSONDecodeError, KeyError):
         return set()
 
