@@ -178,6 +178,12 @@ def main() -> None:
         metavar="NOTION_USER_ID",
         help="Notion user ID to filter tasks (overrides NOTION_USER_ID env var).",
     )
+    parser.add_argument(
+        "--show-prs",
+        action="store_true",
+        default=False,
+        help="Include GitHub PRs in the standup report.",
+    )
     args = parser.parse_args()
 
     effective_user = args.user or NOTION_USER_ID
@@ -199,6 +205,10 @@ def main() -> None:
     tasks = [t for t in tasks if t.get("id") in my_task_ids or t.get("parent_id")]
     print(f"Filtered to {len(tasks)} assigned tasks", file=sys.stderr)
     done_issues, review_issues, blocked_issues, backlog_issues, active = classify_tasks(tasks)
+
+    if not args.show_prs:
+        for task_info in active.values():
+            task_info["prs"] = []
 
     prev_snap = _find_prev_snapshot(snapshot_path)
     if prev_snap:

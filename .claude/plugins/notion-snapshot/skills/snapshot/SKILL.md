@@ -1,6 +1,6 @@
 ---
 description: This skill should be used when the user invokes "/notion-snapshot:snapshot", asks to "build a sprint snapshot", "fetch notion tasks", "run the snapshot pipeline", or "update snapshot". Runs the full Notion sprint snapshot pipeline using MCP directly in-session — fetches sprints, tasks, PRs, and comments via Notion MCP, then runs AI synthesis.
-argument-hint: "[standup|review] [ru]"
+argument-hint: "[standup|review] [ru] [--with-prs]"
 allowed-tools: ["Bash", "Read", "Write", "mcp__claude_ai_Notion__notion-query-data-sources", "mcp__claude_ai_Notion__notion-get-comments"]
 ---
 
@@ -55,7 +55,9 @@ Call `mcp__claude_ai_Notion__notion-query-data-sources` with:
 
 Write the raw JSON array to `$DIR/notion_tasks.json`.
 
-## Step 4 — Fetch PR data
+## Step 4 — Fetch PR data (conditional)
+
+**Skip this step unless `--with-prs` flag is present in the argument.** If skipped, write `{}` to `$DIR/notion_prs.json` and continue.
 
 > Detailed rules: `.claude/plugins/notion-snapshot/skills/snapshot/rules/fetch-prs.md`
 
@@ -105,6 +107,10 @@ Produces `$DIR/snapshot.json`.
 
 - **`standup`** or **`standup en`**:
   ```bash
+  # If --with-prs flag is present:
+  uv run standup.py --snapshot-dir "$DIR" --slack --show-prs
+  
+  # Otherwise (default):
   uv run standup.py --snapshot-dir "$DIR" --slack
   ```
 - **`review`**:
