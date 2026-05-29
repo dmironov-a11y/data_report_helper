@@ -211,6 +211,7 @@ def main() -> None:
             task_info["prs"] = []
 
     prev_snap = _find_prev_snapshot(snapshot_path)
+    prev_done = set()
     if prev_snap:
         prev_done = _load_prev_done_idents(prev_snap)
         done_issues = [t for t in done_issues if t["id"] not in prev_done]
@@ -218,6 +219,33 @@ def main() -> None:
         print(f"Done diff vs {prev_snap}: {len(done_issues) + len(review_issues)} newly completed", file=sys.stderr)
     else:
         print("[WARN] No snapshot found for previous working day — showing all done tasks", file=sys.stderr)
+
+    # Load Done tasks from raw notion_tasks.json to include recently completed tasks
+    # only if they transitioned to Done (not already done in previous snapshot)
+    tasks_path = os.path.join(snapshot_dir, "notion_tasks.json")
+    if os.path.exists(tasks_path) and prev_snap:
+        try:
+            with open(tasks_path) as f:
+                raw_tasks = json.load(f)
+            raw_tasks = raw_tasks if isinstance(raw_tasks, list) else raw_tasks.get("results", [])
+
+            # Add Done tasks that weren't done in previous snapshot (newly completed)
+            done_ids = {t["id"] for t in done_issues}
+            for raw_task in raw_tasks:
+                if raw_task.get("State", "").lower() in ("done", "completed"):
+                    task_id = raw_task.get("userDefined:ID")
+                    task_ident = f"#{task_id}" if task_id else None
+                    # Only add if: it's for current user, not already in done_issues, and wasn't done before
+                    if task_ident and task_ident not in done_ids and task_ident not in prev_done:
+                        if task_id in my_task_ids:
+                            done_issues.append({
+                                "id": task_ident,
+                                "title": raw_task.get("Task name", "Unknown"),
+                                "url": raw_task.get("url", ""),
+                                "state": raw_task.get("State", "Done")
+                            })
+        except (OSError, json.JSONDecodeError):
+            pass
 
     today = date.today()
     if args.standup_date:
