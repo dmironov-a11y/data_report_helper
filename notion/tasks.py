@@ -81,22 +81,45 @@ def load_sprint_url(snapshot_dir: str, sprint_key: str) -> str | None:
     return sprint.get("url") if sprint else None
 
 
-def sql_mode(model: str, sprint_url: str | None = None) -> str:
-    """Use notion-query-data-sources MCP tool with explicit SQL query."""
+def sql_mode(model: str, sprint_url: str | None = None, extra_urls: list[str] | None = None) -> str:
+    """Use notion-query-data-sources MCP tool with explicit SQL query.
+
+    If extra_urls is provided, fetch done tasks from those sprint URLs too and merge results.
+    """
     if sprint_url:
         query = f'SELECT * FROM "{TASKS_DB}" WHERE "Sprint" LIKE \'%{sprint_url}%\''
     else:
         query = f'SELECT * FROM "{TASKS_DB}"'
-    prompt = (
-        'Use the notion-query-data-sources MCP tool with these exact parameters:\n'
-        f'- mode: "sql"\n'
-        f'- data_source_urls: ["{TASKS_DB}"]\n'
-        f'- query: {query}\n\n'
-        'Output ONLY the raw JSON response from the MCP tool, nothing else.\n'
-        'No preamble, no explanation, no code fences, no markdown.\n'
-        'Every character must come from the MCP tool output.\n'
-        'Do not truncate, abbreviate, or modify any data.'
-    )
+
+    extra_queries = []
+    for eu in (extra_urls or []):
+        extra_queries.append(
+            f'SELECT * FROM "{TASKS_DB}" WHERE "Sprint" LIKE \'%{eu}%\''
+            f" AND \"State\" IN ('Done', 'To Release', 'Cancelled', 'Monitoring')"
+        )
+
+    if extra_queries:
+        all_queries = "\n".join(
+            [f"Query 1: {query}"] + [f"Query {i+2}: {q}" for i, q in enumerate(extra_queries)]
+        )
+        prompt = (
+            'Use the notion-query-data-sources MCP tool to run each query below in sequence.\n'
+            'Merge all result arrays into a single JSON array (deduplicate by "id").\n'
+            f'{all_queries}\n\n'
+            'Output ONLY the merged raw JSON array, nothing else.\n'
+            'No preamble, no explanation, no code fences, no markdown.'
+        )
+    else:
+        prompt = (
+            'Use the notion-query-data-sources MCP tool with these exact parameters:\n'
+            f'- mode: "sql"\n'
+            f'- data_source_urls: ["{TASKS_DB}"]\n'
+            f'- query: {query}\n\n'
+            'Output ONLY the raw JSON response from the MCP tool, nothing else.\n'
+            'No preamble, no explanation, no code fences, no markdown.\n'
+            'Every character must come from the MCP tool output.\n'
+            'Do not truncate, abbreviate, or modify any data.'
+        )
     text = run_claude(prompt, model)
     return extract_file_if_saved(text)
 
@@ -123,6 +146,9 @@ def main():
                     help="Claude model (default: haiku)")
     ap.add_argument("--sprint", default="current", choices=["current", "next", "last", "all"],
                     help="sprint filter: current (default), next, last, or all (no filter)")
+
+    ap.add_argument("--include-last-sprint-done", action="store_true", default=False,
+                    help="Also fetch done tasks from last sprint and merge (useful at sprint transitions)")
 
     mode_group = ap.add_mutually_exclusive_group()
     mode_group.add_argument("--sql", action="store_true", dest="sql_mode", default=True,
@@ -156,12 +182,20 @@ def main():
         else:
             print(f"No notion_sprints.json found in {snapshot_dir}, fetching all tasks", file=sys.stderr)
 
+    # Resolve extra sprint URLs for last-sprint done tasks
+    extra_urls = None
+    if args.include_last_sprint_done and not args.prompt_mode and args.sprint not in ("all", "last"):
+        last_url = load_sprint_url(snapshot_dir, "last")
+        if last_url:
+            extra_urls = [last_url]
+            print(f"Also fetching done tasks from last sprint ({last_url})", file=sys.stderr)
+
     # Fetch data based on mode
     if args.prompt_mode:
         text = prompt_mode(args.model)
         mode_label = "prompt"
     else:  # SQL mode (default)
-        text = sql_mode(args.model, sprint_url=sprint_url)
+        text = sql_mode(args.model, sprint_url=sprint_url, extra_urls=extra_urls)
         mode_label = "sql"
 
     # Strip preamble/code fences so the file is clean JSON

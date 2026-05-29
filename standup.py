@@ -13,10 +13,16 @@ import glob
 import json
 import os
 import re
+import subprocess
 import sys
 from datetime import date
+from pathlib import Path
 
 from lib.config import GITHUB_TOKEN, NOTION_USER_ID, SLACK_BOT_TOKEN, SLACK_USER_ID, parse_date_arg
+
+# Import get_state_group from synthesize for consistent group classification
+sys.path.insert(0, str(Path(__file__).parent / "notion"))
+from synthesize import get_state_group
 from lib.github import get_github_commits, title_from_commits
 from lib.report import prev_workday, workday_range, build_report, build_slack_report
 from lib.slack import send_to_slack
@@ -55,6 +61,59 @@ def _load_prev_done_idents(prev_path: str) -> set[str]:
                 if t.get("state", "").lower() in ("done", "to release", "cancelled")}
     except (OSError, json.JSONDecodeError, KeyError):
         return set()
+
+
+def _detect_sprint_transition(current_snap_dir: str, prev_snap_path: str | None) -> bool:
+    """Return True if the current and previous snapshots are from different sprints."""
+    if not prev_snap_path:
+        return False
+    prev_dir = os.path.dirname(prev_snap_path)
+    try:
+        with open(os.path.join(current_snap_dir, "notion_sprints.json")) as f:
+            cur_sprint = json.load(f).get("current", {}).get("sprint_id")
+        with open(os.path.join(prev_dir, "notion_sprints.json")) as f:
+            prev_sprint = json.load(f).get("current", {}).get("sprint_id")
+        return cur_sprint != prev_sprint
+    except (OSError, json.JSONDecodeError, AttributeError):
+        return False
+
+
+def _find_missing_active_tasks(
+    current_snap_dir: str, prev_snap_path: str, user_id: str, prev_done: set[str]
+) -> list[dict]:
+    """On sprint transition: find last-sprint tasks that were active (not done) in prev snapshot
+    but are absent from the current sprint. These may have been completed after the last snapshot."""
+    prev_dir = os.path.dirname(prev_snap_path)
+    prev_tasks_path = os.path.join(prev_dir, "notion_tasks.json")
+    cur_tasks_path = os.path.join(current_snap_dir, "notion_tasks.json")
+    try:
+        with open(prev_tasks_path) as f:
+            prev_raw = json.load(f)
+        prev_raw = prev_raw if isinstance(prev_raw, list) else prev_raw.get("results", [])
+        with open(cur_tasks_path) as f:
+            cur_raw = json.load(f)
+        cur_raw = cur_raw if isinstance(cur_raw, list) else cur_raw.get("results", [])
+    except (OSError, json.JSONDecodeError):
+        return []
+
+    cur_ids = {t.get("userDefined:ID") for t in cur_raw}
+    missing = []
+    for t in prev_raw:
+        try:
+            assignees = json.loads(t.get("Assignees") or "[]")
+        except (json.JSONDecodeError, ValueError):
+            assignees = []
+        if user_id not in assignees:
+            continue
+        uid = t.get("userDefined:ID")
+        ident = f"#{uid}" if uid else None
+        if not ident or ident in prev_done or uid in cur_ids:
+            continue
+        # Task was assigned to user, not already done, and is gone from current sprint
+        state = t.get("State", "")
+        if get_state_group(state) not in ("done", "review", "cancelled"):
+            missing.append({"id": ident, "title": t.get("Task name", "?"), "state": state})
+    return missing
 
 
 def _load_assignee_ids(snapshot_dir: str, user_id: str) -> set[int]:
@@ -201,6 +260,21 @@ def main() -> None:
 
     tasks = snap.get("tasks", [])
     snapshot_dir = os.path.dirname(snapshot_path)
+
+    # Load prev snapshot early so we can detect sprint transitions before fetching tasks
+    prev_snap = _find_prev_snapshot(snapshot_path)
+
+    # On sprint transition, re-fetch notion_tasks.json to include last-sprint done tasks
+    # (covers tasks completed in the old sprint after the previous snapshot was taken)
+    if _detect_sprint_transition(snapshot_dir, prev_snap):
+        print("Sprint transition detected: fetching last-sprint done tasks from Notion...", file=sys.stderr)
+        res = subprocess.run(
+            ["uv", "run", "notion/tasks.py", "--dir", snapshot_dir, "--include-last-sprint-done"],
+            text=True,
+        )
+        if res.returncode != 0:
+            print("[WARN] Failed to fetch last-sprint done tasks — standup may be incomplete", file=sys.stderr)
+
     my_task_ids = _load_assignee_ids(snapshot_dir, effective_user)
     tasks = [t for t in tasks if t.get("id") in my_task_ids or t.get("parent_id")]
     print(f"Filtered to {len(tasks)} assigned tasks", file=sys.stderr)
@@ -210,13 +284,22 @@ def main() -> None:
         for task_info in active.values():
             task_info["prs"] = []
 
-    prev_snap = _find_prev_snapshot(snapshot_path)
     prev_done = set()
     if prev_snap:
         prev_done = _load_prev_done_idents(prev_snap)
         done_issues = [t for t in done_issues if t["id"] not in prev_done]
         review_issues = [t for t in review_issues if t["id"] not in prev_done]
         print(f"Done diff vs {prev_snap}: {len(done_issues) + len(review_issues)} newly completed", file=sys.stderr)
+        # Warn on sprint transition: tasks that were active in prev sprint but absent from current
+        if _detect_sprint_transition(snapshot_dir, prev_snap):
+            missing = _find_missing_active_tasks(snapshot_dir, prev_snap, effective_user, prev_done)
+            if missing:
+                print(
+                    f"[WARN] Sprint transition detected. {len(missing)} task(s) from previous sprint "
+                    f"were active but not in current sprint — may have been completed after last snapshot:\n"
+                    + "\n".join(f"       {t['id']} {t['title']} (was: {t['state']})" for t in missing),
+                    file=sys.stderr,
+                )
     else:
         print("[WARN] No snapshot found for previous working day — showing all done tasks", file=sys.stderr)
 
@@ -232,7 +315,8 @@ def main() -> None:
             # Add Done tasks that weren't done in previous snapshot (newly completed)
             done_ids = {t["id"] for t in done_issues}
             for raw_task in raw_tasks:
-                if raw_task.get("State", "").lower() in ("done", "completed"):
+                group = get_state_group(raw_task.get("State", ""))
+                if group in ("done", "review"):
                     task_id = raw_task.get("userDefined:ID")
                     task_ident = f"#{task_id}" if task_id else None
                     # Only add if: it's for current user, not already in done_issues, and wasn't done before
